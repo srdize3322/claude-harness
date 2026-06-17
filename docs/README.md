@@ -345,6 +345,25 @@ claude-harness
 
 OpenAI. Modelos GPT-5, GPT-4, o1, o3, etc.
 
+### Multi-provider (sesiones mixtas)
+
+```bash
+claude-harness
+# → Claude (main) → claude-opus-4-6
+#   sonnet slot → [Codex] gpt-5.4
+#   haiku slot  → [MiniMax] MiniMax-M3
+```
+
+Una sola sesión de Claude Code con modelos de **distintos providers**. El
+`claude-harness` auto-detecta cuando los slots son de un provider diferente al
+main y arranca un smart proxy local que rutea cada request al backend correcto
+(Anthropic, Codex, MiniMax, OpenRouter u OpenCode Go).
+
+Si main y slots son todos del mismo provider, no hay overhead - usa el wrapper
+de ese provider directo.
+
+## Cómo funciona (el truco del `[1m]`)
+
 ## Cómo funciona (el truco del `[1m]`)
 
 Claude Code internamente tiene una lista hardcodeada de modelos con sus context windows.
@@ -459,6 +478,11 @@ CLAUDE_HARNESS_REPO_URL="file://$PWD" \
 
 # Validar sintaxis
 python3 -c "import ast; ast.parse(open('scripts/claude-harness-ui.py').read())"
+
+# Correr tests
+bash scripts/test-codex-proxy.sh       # 16 tests: codex proxy
+bash worker/test/test-claude-codex.sh  # 25 tests: codex wrapper
+bash scripts/test-smart-proxy.sh      # tests: smart proxy + multi-provider
 ```
 
 ## Roadmap
