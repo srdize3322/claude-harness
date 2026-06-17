@@ -175,11 +175,14 @@ tests = [
     ("gpt-5.4-mini", "codex"),
     ("o3-mini", "codex"),
     ("MiniMax-M3", "minimax"),
-    ("minimax-m3", "minimax"),
-    ("minimax/M3", "minimax"),
+    ("minimax-m3", "main"),  # OpenCode Go default (lowercase) - main backend
+    ("minimax/MiniMax-M3", "minimax"),
     ("codex/gpt-5.5", "codex"),
     ("anthropic/claude-opus-4-6", "anthropic"),
     ("openrouter/gpt-4", "openrouter"),
+    ("opencode-go/minimax-m3", "opencode-go"),
+    ("opencode-go/kimi-k2.7-code", "opencode-go"),
+    ("kimi-k2.7-code", "main"),  # OpenCode Go model - main backend
 ]
 ok = 0
 for model, expected in tests:

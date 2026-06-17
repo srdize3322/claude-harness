@@ -146,14 +146,18 @@ if [ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ]; then
   export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDE_HARNESS_SLOT_HAIKU}"
 fi
 
-# Inform smart-proxy which backend to use for unprefixed models
+# Inform smart-proxy which backend to use for unprefixed models.
+# Note: MiniMax-* is the MiniMax API (PascalCase), while minimax-* is
+# the OpenCode Go default model (lowercase, so the same prefix but
+# case-sensitive routing). The smart-proxy uses the same case-sensitive
+# heuristic.
 if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
   case "$main_model" in
     claude-*|anthropic/*) export CLAUDE_HARNESS_MAIN_BACKEND="anthropic" ;;
     gpt-*|codex-*|codex/*) export CLAUDE_HARNESS_MAIN_BACKEND="codex" ;;
     MiniMax-*|minimax/*) export CLAUDE_HARNESS_MAIN_BACKEND="minimax" ;;
     openrouter/*) export CLAUDE_HARNESS_MAIN_BACKEND="openrouter" ;;
-    opencode-go/*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
+    opencode-go/*|minimax-*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
   esac
 fi
 

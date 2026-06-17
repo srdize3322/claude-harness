@@ -206,9 +206,14 @@ def detect_backend(model: str) -> tuple[str, str]:
     if bare.startswith("gpt-") or bare.startswith("o1") or bare.startswith("o3") \
             or bare.startswith("o4") or bare.startswith("codex-"):
         return "codex", m
-    if bare.startswith("minimax-") or bare.startswith("minimax-m") or bare == "minimax-m3":
+    # MiniMax: case-sensitive! The MiniMax API uses PascalCase
+    # (MiniMax-M3, MiniMax-M2.7, etc.). OpenCode Go uses lowercase
+    # (minimax-m3) as its default model. So we only route to MiniMax
+    # if the name starts with a capital 'M' (i.e. looks like a MiniMax
+    # API model name, not an OpenCode Go model name).
+    if m.startswith("MiniMax-") or m.startswith("MiniMax/") or m == "MiniMax-M3":
         return "minimax", m
-    if bare.startswith("minimax/") or "/" in m and m.split("/")[0] == "minimax":
+    if "/" in m and m.split("/")[0] == "minimax":
         return "minimax", m
 
     # Fallback to main backend (set by the wrapper)
