@@ -23,7 +23,9 @@ export function detectCodexMode(authHeader) {
 }
 
 // parseCodexAuth parses the ANTHROPIC_AUTH_TOKEN header into its parts.
-// Returns { accessToken, accountId, baseUrl } or null if invalid.
+// Returns { accessToken, accountId } or null if invalid.
+// The baseUrl is NOT extracted from the header; it's determined by the
+// CODEX_BASE_URL env var (set via wrangler.toml or wrangler dev --var).
 export function parseCodexAuth(authHeader) {
   if (!detectCodexMode(authHeader)) return null;
   const rest = authHeader.slice("codex:".length);
@@ -34,7 +36,14 @@ export function parseCodexAuth(authHeader) {
   const accessToken = rest.slice(0, lastColon);
   const accountId = rest.slice(lastColon + 1);
   if (!accessToken || !accountId) return null;
-  return { accessToken, accountId, baseUrl: CODEX_DEFAULT_BASE_URL };
+  return { accessToken, accountId };
+}
+
+// resolveCodexBaseUrl returns the Codex backend base URL.
+// Order of preference: env.CODEX_BASE_URL > CODEX_DEFAULT_BASE_URL.
+// This allows testing against a mock backend via `wrangler dev --var CODEX_BASE_URL=...`.
+export function resolveCodexBaseUrl(env) {
+  return (env && env.CODEX_BASE_URL) || CODEX_DEFAULT_BASE_URL;
 }
 
 // codexHeaders builds the headers for a Codex backend request.
@@ -521,7 +530,7 @@ export function codexResponseToAnthropic(resp, requestModel) {
 // handleCodexMessages handles an Anthropic Messages API request, translates it
 // to the OpenAI Codex Responses API, and returns the result (streaming or
 // non-streaming).
-export async function handleCodexMessages(request, _env) {
+export async function handleCodexMessages(request, env) {
   // 1. Parse auth
   const authHeader = request.headers.get("Authorization") || "";
   const auth = parseCodexAuth(authHeader);
@@ -584,7 +593,8 @@ export async function handleCodexMessages(request, _env) {
   const headers = codexHeaders({}, auth.accessToken, auth.accountId, sessionId);
 
   // 5. POST with retries
-  const url = `${auth.baseUrl}${CODEX_RESPONSES_PATH}`;
+  const baseUrl = resolveCodexBaseUrl(env);
+  const url = `${baseUrl}${CODEX_RESPONSES_PATH}`;
   let response = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {

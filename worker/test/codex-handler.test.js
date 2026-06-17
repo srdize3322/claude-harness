@@ -17,6 +17,7 @@ import {
   codexResponseToAnthropic,
   createCodexToAnthropicTransform,
   handleCodexMessages,
+  resolveCodexBaseUrl,
 } from "../src/codex-handler.js";
 
 test("detectCodexMode: detects 'codex:' prefix", () => {
@@ -37,7 +38,7 @@ test("parseCodexAuth: parses valid header", () => {
   assert(result !== null);
   assert.equal(result.accessToken, "eyJhbGciOiJSUzI1NiJ9.abc");
   assert.equal(result.accountId, "b86f7cb8-e91b-452a-8630-3f869bccfff0");
-  assert(result.baseUrl.startsWith("https://"));
+  // baseUrl is no longer in parseCodexAuth result; use resolveCodexBaseUrl instead
 });
 
 test("parseCodexAuth: rejects non-codex header", () => {
@@ -1081,4 +1082,22 @@ test("handleCodexMessages: honors X-Codex-Service-Tier header", async () => {
   } finally {
     m.restore();
   }
+});
+
+test("resolveCodexBaseUrl: uses env override when set", () => {
+  assert.equal(
+    resolveCodexBaseUrl({ CODEX_BASE_URL: "http://mock:9999" }),
+    "http://mock:9999"
+  );
+});
+
+test("resolveCodexBaseUrl: uses default when env not set", () => {
+  assert.equal(
+    resolveCodexBaseUrl({}),
+    "https://chatgpt.com/backend-api"
+  );
+  assert.equal(
+    resolveCodexBaseUrl(undefined),
+    "https://chatgpt.com/backend-api"
+  );
 });
