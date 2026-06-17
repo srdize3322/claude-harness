@@ -351,18 +351,16 @@ def anthropic_to_codex(body: dict, model: str) -> dict:
         out["tools"] = convert_tools(tools)
         out["tool_choice"] = "auto"
         out["parallel_tool_calls"] = True
-    gen = {}
+    # Codex uses top-level parameters, not a nested generation_config.
     if isinstance(body.get("max_tokens"), (int, float)):
-        gen["max_output_tokens"] = body["max_tokens"]
+        out["max_output_tokens"] = body["max_tokens"]
     if isinstance(body.get("temperature"), (int, float)):
-        gen["temperature"] = body["temperature"]
+        out["temperature"] = body["temperature"]
     if isinstance(body.get("top_p"), (int, float)):
-        gen["top_p"] = body["top_p"]
+        out["top_p"] = body["top_p"]
     stops = body.get("stop_sequences")
     if isinstance(stops, list) and stops:
-        gen["stop"] = stops
-    if gen:
-        out["generation_config"] = gen
+        out["stop"] = stops
     thinking = body.get("thinking")
     if isinstance(thinking, dict):
         reasoning = {}
