@@ -210,9 +210,9 @@ def _extract_tool_result_text(block: dict) -> str:
 def convert_user_message(msg: dict) -> list:
     content = msg.get("content")
     if isinstance(content, str):
-        return [{"role": "user", "content": [{"type": "text", "text": content}]}]
+        return [{"role": "user", "content": [{"type": "input_text", "text": content}]}]
     if not isinstance(content, list):
-        return [{"role": "user", "content": [{"type": "text", "text": str(content)}]}]
+        return [{"role": "user", "content": [{"type": "input_text", "text": str(content)}]}]
     parts = []
     tool_outputs = []
     for block in content:
@@ -220,7 +220,9 @@ def convert_user_message(msg: dict) -> list:
             continue
         btype = block.get("type")
         if btype == "text":
-            parts.append({"type": "text", "text": _to_text(block)})
+            # Codex Responses API: user text content uses `input_text`,
+            # not Anthropic's plain `text`.
+            parts.append({"type": "input_text", "text": _to_text(block)})
         elif btype == "image":
             source = block.get("source") or {}
             if source.get("data"):
@@ -228,7 +230,7 @@ def convert_user_message(msg: dict) -> list:
                 image_val = f"data:{media};base64,{source['data']}"
             else:
                 image_val = source.get("url")
-            parts.append({"type": "image", "image": image_val})
+            parts.append({"type": "input_image", "image_url": image_val})
         elif btype == "tool_result":
             tool_outputs.append({
                 "type": "function_call_output",
@@ -240,16 +242,16 @@ def convert_user_message(msg: dict) -> list:
         items.append({"role": "user", "content": parts})
     items.extend(tool_outputs)
     if not items:
-        items = [{"role": "user", "content": [{"type": "text", "text": ""}]}]
+        items = [{"role": "user", "content": [{"type": "input_text", "text": ""}]}]
     return items
 
 
 def convert_assistant_message(msg: dict) -> list:
     content = msg.get("content")
     if isinstance(content, str):
-        return [{"role": "assistant", "content": [{"type": "text", "text": content}]}]
+        return [{"role": "assistant", "content": [{"type": "output_text", "text": content}]}]
     if not isinstance(content, list):
-        return [{"role": "assistant", "content": [{"type": "text", "text": str(content)}]}]
+        return [{"role": "assistant", "content": [{"type": "output_text", "text": str(content)}]}]
     text_parts = []
     tool_calls = []
     for block in content:
@@ -257,7 +259,8 @@ def convert_assistant_message(msg: dict) -> list:
             continue
         btype = block.get("type")
         if btype == "text":
-            text_parts.append({"type": "text", "text": _to_text(block)})
+            # Codex Responses API: assistant text content uses `output_text`.
+            text_parts.append({"type": "output_text", "text": _to_text(block)})
         elif btype == "tool_use":
             try:
                 args = json.dumps(block.get("input") or {})
@@ -275,9 +278,9 @@ def convert_assistant_message(msg: dict) -> list:
         items.append({"role": "assistant", "content": text_parts})
     items.extend(tool_calls)
     if not text_parts and tool_calls:
-        items.insert(0, {"role": "assistant", "content": [{"type": "text", "text": ""}]})
+        items.insert(0, {"role": "assistant", "content": [{"type": "output_text", "text": ""}]})
     if not items:
-        items = [{"role": "assistant", "content": [{"type": "text", "text": ""}]}]
+        items = [{"role": "assistant", "content": [{"type": "output_text", "text": ""}]}]
     return items
 
 
