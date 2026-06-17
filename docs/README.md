@@ -112,49 +112,93 @@ Los providers buscan sus API keys en estos lugares (en orden):
 
 Si no tenés la key, la TUI te lleva al menú de "Login / Configuración" del provider.
 
-## Uso
+## Cómo usar (el ritmo de uso)
 
-### TUI interactiva
+`claude-harness` está pensado para que lo uses 5 veces y nunca más lo pienses. El flujo es siempre el mismo:
+
+### 1. Instalás (una vez)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srdize3322/claude-harness/main/install.sh | bash
+```
+
+Configurás tus API keys en `~/.config/claude-harness/.env`. Eso es todo.
+
+### 2. Elegís setup (cada vez que arrancás)
 
 ```bash
 claude-harness
 ```
 
-Flujo: **Provider → Modelo → Thinking → Subagentes → Permisos → Confirmar → Launch**.
+Te aparece la TUI. Navegás con flechas, elegís con `Enter`. El flujo es siempre:
 
-Key bindings:
-- `Enter`: elegir / avanzar
-- `Esc`: volver
-- `↑/↓`: navegar
-- `Ctrl+R`: refresh catalog
-- `Ctrl+F`: filter (en model picker)
-- `Ctrl+S`: favorite
-- `Ctrl+D`: default
-- `Ctrl+L`: login
-- `Ctrl+Q`: quit
-- Type: search
+```
+1. ¿Qué provider?       →  MiniMax / OpenRouter / OpenCode Go / Anthropic / Codex
+2. ¿Qué modelo?          →  M3, Sonnet 4.5, GPT-5, DeepSeek, etc. (5000+ disponibles)
+3. ¿Qué thinking?        →  off / low / medium / high / xhigh / max / ultracode
+4. ¿Slots de subagentes?  →  opus/sonnet/haiku (default = main, o custom)
+5. ¿Permisos?             →  default / on-request / never / bypass
+6. ¿Confirmar?            →  ves el summary, Enter para abrir Claude
+```
 
-### CLI directo
+### 3. Trabajás normal (todo lo que ya conocés)
+
+Una vez que se abre Claude Code, es **exactamente igual** que sin el harness:
+
+- `Enter` para mandar mensajes
+- `↑/↓` para navegar el historial
+- `Tab` para autocompletar
+- `Ctrl+C` para cancelar
+- `/context` para ver el context window
+- `/effort high` para cambiar el thinking level
+- `/compact` para compactar manualmente
+- `/mcp`, `/agents`, `/memory`, `/status` para gestionar
+
+**El harness solo configuró el ambiente antes de lanzar Claude Code.** Después, te olvidaste de él.
+
+### 4. Cerrás y seguís
+
+`Ctrl+D` o `exit` cierra Claude Code. Tu próxima sesión es igual.
+
+### 5. Repetís (con un atajo si querés)
+
+Si ya sabés qué setup querés, saltá la TUI:
 
 ```bash
-# Launch con provider + model + thinking + skip-permissions
+# Launch directo (sin TUI)
 claude-harness --provider minimax --model MiniMax-M3 --thinking high --dangerously-skip-permissions
 
-# Con slots custom
+# Con slots custom por subagente
 claude-harness --provider minimax --model MiniMax-M3 \
   --slot-opus claude-sonnet-4-5 \
   --slot-sonnet MiniMax-M3 \
   --slot-haiku MiniMax-M2.5 \
   --dangerously-skip-permissions
 
-# Refresh del catalog
+# Refresh del catalog (si agregaron modelos nuevos en models.dev)
 claude-harness --refresh-catalog
 
-# Skip a la TUI (llama claude directamente)
+# Llamar a claude directamente sin TUI (modo legacy)
 claude-harness --skip --model claude-sonnet-4-5
 ```
 
-### Slash commands dentro de Claude Code
+## Key bindings de la TUI
+
+Dentro de la TUI, antes de abrir Claude Code:
+
+- `Enter`: elegir / avanzar al siguiente paso
+- `Esc`: volver al paso anterior
+- `↑/↓` o `j/k`: navegar listas
+- `Ctrl+R`: refresh catalog (descarga modelos nuevos)
+- `Ctrl+F`: filter (en model picker)
+- `Ctrl+S`: favorite / unfavorite el modelo actual
+- `Ctrl+D`: default model
+- `Ctrl+L`: login (configurar API key del provider)
+- `Ctrl+Q`: quit
+- `?`: ayuda
+- Cualquier tecla imprimible: search en model picker
+
+## Slash commands dentro de Claude Code
 
 Una vez dentro, todo funciona normal:
 
