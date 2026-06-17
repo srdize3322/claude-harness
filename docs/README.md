@@ -34,7 +34,7 @@ con el mismo flujo, los mismos slash commands, las mismas skills, los mismos MCP
 ### One-liner (recomendado)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anomalyco/claude-harness/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srdize3322/claude-harness/main/install.sh | bash
 ```
 
 Eso es. El script:

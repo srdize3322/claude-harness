@@ -12,7 +12,7 @@ set -euo pipefail
 
 # REPO_URL apunta al repo base (ej: https://github.com/user/claude-harness).
 # Por default usamos raw.githubusercontent.com para descargas.
-GITHUB_REPO="${CLAUDE_HARNESS_REPO_URL:-https://github.com/anomalyco/claude-harness}"
+GITHUB_REPO="${CLAUDE_HARNESS_REPO_URL:-https://github.com/srdize3322/claude-harness}"
 REPO_BRANCH="${CLAUDE_HARNESS_REPO_BRANCH:-main}"
 
 # Convertir github.com/... a raw.githubusercontent.com/...
