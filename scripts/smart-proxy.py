@@ -375,9 +375,10 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         if backend == "main":
             backend = main_backend or "anthropic"
 
-        # Pass through request headers (sans Host/Content-Length/Accept-Encoding)
+        # Pass through request headers but force uncompressed response
         in_headers = {k: v for k, v in self.headers.items()
                       if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
+        in_headers["Accept-Encoding"] = "identity"
 
         try:
             if backend == "anthropic":
@@ -478,7 +479,11 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
 
     def _stream_response(self, upstream):
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
+        ct = upstream.headers.get("content-type", "text/event-stream")
+        ce = upstream.headers.get("content-encoding")
+        self.send_header("Content-Type", ct)
+        if ce:
+            self.send_header("Content-Encoding", ce)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.send_header("Transfer-Encoding", "chunked")
@@ -519,7 +524,10 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
             return self._error(502, f"Failed to read upstream: {e}", "api_error")
         self.send_response(200)
         ct = upstream.headers.get("content-type", "application/json")
+        ce = upstream.headers.get("content-encoding")
         self.send_header("Content-Type", ct)
+        if ce:
+            self.send_header("Content-Encoding", ce)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
         self.end_headers()
