@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" != /* ]]; then
+    SOURCE="$DIR/$TARGET"
+  else
+    SOURCE="$TARGET"
+  fi
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+exec python3 "$SCRIPT_DIR/claude-harness-ui.py" "$@"

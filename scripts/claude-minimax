@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HARNESS_ENV_FILE="$HOME/.config/claude-harness/.env"
+MINIMAX_ENV_FILE="$HOME/.config/minimax-mcp/.env"
+DEFAULT_MODEL="MiniMax-M3"
+DEFAULT_BASE_URL="https://api.minimax.io"
+
+load_env_file() {
+  local path=$1
+
+  if [ -f "$path" ]; then
+    set -a
+    . "$path"
+    set +a
+  fi
+}
+
+normalize_model() {
+  local value=${1:-}
+  value=${value#minimax/}
+  printf '%s\n' "$value"
+}
+
+load_env_file "$MINIMAX_ENV_FILE"
+load_env_file "$HARNESS_ENV_FILE"
+
+if [ -z "${MINIMAX_API_KEY:-}" ] && [ -f "$HOME/.local/share/opencode/auth.json" ]; then
+  MINIMAX_API_KEY="$(
+    python3 -c 'import json, pathlib; p = pathlib.Path.home() / ".local/share/opencode/auth.json"; data = json.loads(p.read_text()) if p.exists() else {}; print(data.get("minimax", {}).get("key", ""))'
+  )"
+fi
+
+if [ -z "${MINIMAX_API_KEY:-}" ]; then
+  echo "MINIMAX_API_KEY no esta configurada. Usa claude-harness > MiniMax > login/configuracion." >&2
+  exit 1
+fi
+
+DEFAULT_MODEL="$(normalize_model "${CLAUDE_HARNESS_MINIMAX_MODEL:-$DEFAULT_MODEL}")"
+MINIMAX_BASE_URL="${MINIMAX_BASE_URL:-$DEFAULT_BASE_URL}"
+
+case "${MINIMAX_BASE_URL%/}" in
+  */anthropic)
+    export ANTHROPIC_BASE_URL="${MINIMAX_BASE_URL%/}"
+    ;;
+  *)
+    export ANTHROPIC_BASE_URL="${MINIMAX_BASE_URL%/}/anthropic"
+    ;;
+esac
+export ANTHROPIC_AUTH_TOKEN="$MINIMAX_API_KEY"
+unset ANTHROPIC_API_KEY
+
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-3000000}"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW lo setea el harness segun el modelo elegido.
+# Si no viene seteado, dejamos que Claude Code use su default (200k).
+export ANTHROPIC_MODEL="$DEFAULT_MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$DEFAULT_MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$DEFAULT_MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$DEFAULT_MODEL"
+
+[ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ] && export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLAUDE_HARNESS_SLOT_OPUS"
+[ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ] && export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_HARNESS_SLOT_SONNET"
+[ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ] && export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_HARNESS_SLOT_HAIKU"
+
+should_inject_default_model=true
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|-h|--help|-v|--version)
+      should_inject_default_model=false
+      ;;
+  esac
+done
+
+declare -a passthrough_args
+passthrough_args=()
+expect_model_value=false
+for arg in "$@"; do
+  if [ "$expect_model_value" = true ]; then
+    passthrough_args+=("$(normalize_model "$arg")")
+    expect_model_value=false
+    continue
+  fi
+
+  case "$arg" in
+    -m|--model)
+      passthrough_args+=("$arg")
+      expect_model_value=true
+      ;;
+    *)
+      passthrough_args+=("$arg")
+      ;;
+  esac
+done
+
+declare -a launch_args
+launch_args=("$HOME/.local/bin/claude")
+
+if [ "$should_inject_default_model" = true ] && [ -n "$DEFAULT_MODEL" ]; then
+  launch_args+=("--model" "$DEFAULT_MODEL")
+fi
+
+exec "${launch_args[@]}" ${passthrough_args:+"${passthrough_args[@]}"}

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="$HOME/.config/claude-harness/.env"
+
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  . "$ENV_FILE"
+  set +a
+fi
+
+should_inject_default_model=true
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|-h|--help|-v|--version)
+      should_inject_default_model=false
+      ;;
+  esac
+done
+
+declare -a launch_args
+launch_args=("$HOME/.local/bin/claude")
+
+if [ "$should_inject_default_model" = true ] && [ -n "${CLAUDE_HARNESS_CLAUDE_MODEL:-}" ]; then
+  launch_args+=("--model" "$CLAUDE_HARNESS_CLAUDE_MODEL")
+fi
+
+if [ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ]; then
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLAUDE_HARNESS_SLOT_OPUS"
+fi
+if [ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ]; then
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_HARNESS_SLOT_SONNET"
+fi
+if [ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ]; then
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_HARNESS_SLOT_HAIKU"
+fi
+
+exec "${launch_args[@]}" "$@"

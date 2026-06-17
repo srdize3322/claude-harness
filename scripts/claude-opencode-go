@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HARNESS_ENV_FILE="$HOME/.config/claude-harness/.env"
+AUTH_JSON="$HOME/.local/share/opencode/auth.json"
+PROXY_URL="https://opencode-go-proxy.r2gnqdy9c5.workers.dev"
+DEFAULT_MODEL="minimax-m3"
+
+load_env_file() {
+  local path=$1
+  if [ -f "$path" ]; then
+    set -a
+    . "$path"
+    set +a
+  fi
+}
+
+load_env_file "$HARNESS_ENV_FILE"
+
+if [ -z "${OPENCODE_GO_API_KEY:-}" ] && [ -f "$AUTH_JSON" ]; then
+  OPENCODE_GO_API_KEY="$(
+    python3 -c 'import json, pathlib; p = pathlib.Path.home() / ".local/share/opencode/auth.json"; data = json.loads(p.read_text()) if p.exists() else {}; print(data.get("opencode-go", {}).get("key", ""))'
+  )"
+fi
+
+if [ -z "${OPENCODE_GO_API_KEY:-}" ]; then
+  echo "OPENCODE_GO_API_KEY no esta configurada. Usa claude-harness > OpenCode Go > login/configuracion." >&2
+  exit 1
+fi
+
+MODEL="${CLAUDE_HARNESS_OPENCODE_GO_MODEL:-$DEFAULT_MODEL}"
+
+export ANTHROPIC_BASE_URL="$PROXY_URL"
+export ANTHROPIC_AUTH_TOKEN="$OPENCODE_GO_API_KEY"
+unset ANTHROPIC_API_KEY
+
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW lo setea el harness segun el modelo elegido.
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+
+[ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ] && export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLAUDE_HARNESS_SLOT_OPUS"
+[ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ] && export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_HARNESS_SLOT_SONNET"
+[ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ] && export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_HARNESS_SLOT_HAIKU"
+
+should_inject_default_model=true
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|-h|--help|-v|--version)
+      should_inject_default_model=false
+      ;;
+  esac
+done
+
+declare -a passthrough_args
+passthrough_args=()
+expect_model_value=false
+for arg in "$@"; do
+  if [ "$expect_model_value" = true ]; then
+    passthrough_args+=("$arg")
+    expect_model_value=false
+    continue
+  fi
+
+  case "$arg" in
+    -m|--model)
+      passthrough_args+=("$arg")
+      expect_model_value=true
+      ;;
+    *)
+      passthrough_args+=("$arg")
+      ;;
+  esac
+done
+
+declare -a launch_args
+launch_args=("$HOME/.local/bin/claude")
+
+if [ "$should_inject_default_model" = true ] && [ -n "${CLAUDE_HARNESS_OPENCODE_GO_MODEL:-}" ]; then
+  launch_args+=("--model" "$CLAUDE_HARNESS_OPENCODE_GO_MODEL")
+fi
+
+exec "${launch_args[@]}" "${passthrough_args[@]}"

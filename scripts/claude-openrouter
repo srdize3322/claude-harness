@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROFILE_ENV_FILE="$HOME/.config/claude-openrouter/.env"
+SHARED_OPENROUTER_ENV_FILE="$HOME/.config/mcp-openrouter/.env"
+HARNESS_ENV_FILE="$HOME/.config/claude-harness/.env"
+LEGACY_ENV_FILE="$HOME/.env.local"
+
+load_env_file() {
+  local path=$1
+
+  if [ -f "$path" ]; then
+    set -a
+    . "$path"
+    set +a
+  fi
+}
+
+load_env_file "$SHARED_OPENROUTER_ENV_FILE"
+load_env_file "$PROFILE_ENV_FILE"
+load_env_file "$HARNESS_ENV_FILE"
+
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f "$LEGACY_ENV_FILE" ]; then
+  load_env_file "$LEGACY_ENV_FILE"
+fi
+
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f "$HOME/.local/share/opencode/auth.json" ]; then
+  OPENROUTER_API_KEY="$(
+    python3 -c 'import json, pathlib; p = pathlib.Path.home() / ".local/share/opencode/auth.json"; data = json.loads(p.read_text()) if p.exists() else {}; print(data.get("openrouter", {}).get("key", ""))'
+  )"
+fi
+
+if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+  echo "OPENROUTER_API_KEY is missing. Add it to ~/.config/claude-openrouter/.env or ~/.config/mcp-openrouter/.env" >&2
+  exit 1
+fi
+
+export ANTHROPIC_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api}"
+export ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY"
+unset ANTHROPIC_API_KEY
+
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDE_OPENROUTER_OPUS_MODEL:-openai/gpt-5}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL_NAME="${CLAUDE_OPENROUTER_OPUS_NAME:-GPT-5}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION="${CLAUDE_OPENROUTER_OPUS_DESCRIPTION:-OpenAI via OpenRouter}"
+
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDE_OPENROUTER_SONNET_MODEL:-google/gemini-2.5-pro}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="${CLAUDE_OPENROUTER_SONNET_NAME:-Gemini 2.5 Pro}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="${CLAUDE_OPENROUTER_SONNET_DESCRIPTION:-Google via OpenRouter}"
+
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDE_OPENROUTER_HAIKU_MODEL:-minimax/minimax-m3}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME="${CLAUDE_OPENROUTER_HAIKU_NAME:-MiniMax M3}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION="${CLAUDE_OPENROUTER_HAIKU_DESCRIPTION:-MiniMax via OpenRouter}"
+
+export ANTHROPIC_DEFAULT_FABLE_MODEL="${CLAUDE_OPENROUTER_FABLE_MODEL:-anthropic/claude-fable-5}"
+export ANTHROPIC_DEFAULT_FABLE_MODEL_NAME="${CLAUDE_OPENROUTER_FABLE_NAME:-Claude Fable 5}"
+export ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION="${CLAUDE_OPENROUTER_FABLE_DESCRIPTION:-Anthropic via OpenRouter}"
+
+[ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ] && export ANTHROPIC_DEFAULT_OPUS_MODEL="$CLAUDE_HARNESS_SLOT_OPUS"
+[ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ] && export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_HARNESS_SLOT_SONNET"
+[ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ] && export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_HARNESS_SLOT_HAIKU"
+
+should_inject_default_model=true
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|-h|--help|-v|--version)
+      should_inject_default_model=false
+      ;;
+  esac
+done
+
+declare -a launch_args
+launch_args=("$HOME/.local/bin/claude")
+
+if [ "$should_inject_default_model" = true ] && [ -n "${CLAUDE_HARNESS_OPENROUTER_MODEL:-}" ]; then
+  launch_args+=("--model" "$CLAUDE_HARNESS_OPENROUTER_MODEL")
+fi
+
+exec "${launch_args[@]}" "$@"
