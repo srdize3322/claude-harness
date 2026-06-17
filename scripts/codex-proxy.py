@@ -319,9 +319,17 @@ def anthropic_to_codex(body: dict, model: str) -> dict:
     """Mirror codex-protocol.js anthropicToCodexResponses."""
     if not isinstance(body, dict):
         raise ValueError("Request body is required")
+    # Strip [1m]/[2m] suffix from model name. Claude Code uses these suffixes
+    # to indicate the context window size (e.g. gpt-5.5[1m] = 1M context).
+    # Codex backend with ChatGPT auth rejects them.
+    raw_model = model or body.get("model") or ""
+    clean_model = re.sub(r"\[(1|2)m\]$", "", str(raw_model)).strip()
+    # Codex backend requires stream=true. We always request a stream from
+    # Codex; if the Anthropic caller wanted non-streaming, we buffer the SSE
+    # events and return a single non-streaming Anthropic response.
     out = {
-        "model": model or body.get("model"),
-        "stream": bool(body.get("stream")),
+        "model": clean_model,
+        "stream": True,
         "store": False,
     }
     system = body.get("system")
@@ -333,6 +341,10 @@ def anthropic_to_codex(body: dict, model: str) -> dict:
             for b in system
             if isinstance(b, dict) and b.get("type") == "text"
         )
+    else:
+        # Codex requires the `instructions` field. If the Anthropic request
+        # has no system prompt, we still must send an empty string.
+        out["instructions"] = ""
     out["input"] = convert_messages(body.get("messages") or [])
     tools = body.get("tools")
     if isinstance(tools, list) and tools:
@@ -379,6 +391,7 @@ def create_stream_state(model: str) -> dict:
         "final_usage": None,
         "final_status": None,
         "final_model": None,
+        "final_response": None,
         "finished": False,
     }
 
@@ -554,6 +567,9 @@ def translate_codex_event(evt: dict, state: dict) -> list:
     elif t in ("response.completed", "response.done", "response.incomplete"):
         resp = evt.get("response") or {}
         if isinstance(resp, dict):
+            # Save the full response so we can build a non-streaming Anthropic
+            # response later (the SSE events lose the full output array).
+            state["final_response"] = resp
             if resp.get("status"):
                 state["final_status"] = resp["status"]
             elif not state["final_status"]:
@@ -917,8 +933,11 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         base_url = os.environ.get("CODEX_BASE_URL") or CODEX_DEFAULT_BASE_URL
         url = base_url + CODEX_RESPONSES_PATH
         body_data = json.dumps(codex_body, ensure_ascii=False).encode("utf-8")
+        # We always request a stream from Codex (`stream: True` in
+        # anthropic_to_codex). The Anthropic caller may have asked for
+        # streaming or non-streaming; we honor that on the way out.
         is_streaming = bool(body.get("stream"))
-        req_timeout = None if is_streaming else 600
+        req_timeout = 600
 
         last_error = None  # (status, err_text, headers)
         response = None
@@ -1077,21 +1096,37 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     # ---- Non-streaming response ----
 
     def _non_stream_anthropic_response(self, upstream, model: str) -> None:
+        # Codex always returns SSE. We consume the stream, then build a
+        # single non-streaming Anthropic response from the final response
+        # object embedded in the `response.completed` event.
+        state = create_stream_state(model)
+        buffer = ""
         try:
-            raw = upstream.read()
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                buffer, _translated = process_sse_chunk(
+                    buffer, chunk, state, is_final=False
+                )
         except Exception as e:
             self._anthropic_error(
                 502, f"Failed to read upstream response: {e}", "api_error"
             )
             return
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
+        # Drain any trailing data
+        if buffer.strip():
+            process_sse_chunk(buffer, b"", state, is_final=True)
+
+        final = state.get("final_response")
+        if not isinstance(final, dict):
+            # Stream did not complete; still try to return something useful
             self._anthropic_error(
-                502, f"Upstream returned non-JSON: {e}", "api_error"
+                502, "Codex stream did not complete (no response.completed event)",
+                "api_error",
             )
             return
-        anthropic_data = codex_response_to_anthropic(data, model)
+        anthropic_data = codex_response_to_anthropic(final, model)
         body_bytes = json.dumps(anthropic_data, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
