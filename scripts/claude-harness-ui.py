@@ -1861,7 +1861,8 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
             row = list_start + 1 + i
             if row >= h - 3:
                 break
-            is_sel = (sub_prov == prov_id)
+            # sub_sel: 0 = "= main", 1..5 = providers (in ALL_PROVIDER_IDS order)
+            is_sel = (sub_sel == i + 1)
             marker = ">" if is_sel else " "
             attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
             safe_addstr(stdscr, row, 0,
@@ -1901,10 +1902,11 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
         safe_addstr(stdscr, row, 0,
                     f"  {marker} = main  (default = {main_model.label})", attr)
         row += 1
-        for mid, label, _ in visible:
+        for idx, (mid, label, _) in enumerate(visible):
             if row >= h - 3:
                 break
-            is_sel = (sub_sel > 0 and filtered[sub_scroll + (sub_sel - 1)][0] == mid)
+            # sub_sel == 0 is "= main"; sub_sel > 0 maps to filtered[sub_sel - 1]
+            is_sel = (sub_sel > 0 and sub_sel - 1 == sub_scroll + idx)
             marker = ">" if is_sel else " "
             attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
             # Short label (strip [Provider] prefix for readability)
