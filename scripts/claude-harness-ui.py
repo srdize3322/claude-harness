@@ -320,8 +320,8 @@ def fetch_claude_models() -> list[ModelItem]:
 
 
 def fetch_codex_models() -> list[ModelItem]:
-    raw = load_json_file(CODEX_MODELS_FILE)
     items = [ModelItem("default", "Default")]
+    raw = load_json_file(CODEX_MODELS_FILE)
     models_raw = []
     if isinstance(raw, dict):
         models_raw = raw.get("models", [])
@@ -337,6 +337,13 @@ def fetch_codex_models() -> list[ModelItem]:
             continue
         label = str(entry.get("display_name", slug)).strip() or slug
         items.append(ModelItem(slug, label))
+    if len(items) == 1:
+        items.extend([
+            ModelItem("gpt-5.5", "GPT-5.5"),
+            ModelItem("gpt-5.4", "GPT-5.4"),
+            ModelItem("gpt-5.4-mini", "GPT-5.4-Mini"),
+            ModelItem("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
+        ])
     return items
 
 
