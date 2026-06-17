@@ -589,10 +589,21 @@ def apply_context_window_env(model_id: str, catalog: dict[str, dict[str, dict]] 
         return None
     is_anthropic = is_anthropic_model(model_id, provider_id)
     if is_anthropic:
-        known_ctx = _claude_code_known_context(model_id)
-        threshold = int(known_ctx * 0.9)
+        cc_model = model_id_for_claude_code(model_id, provider_id, catalog)
+        # Use cc_model (que ya tiene [1m] si corresponde) para que
+        # _claude_code_known_context vea el [1m] y retorne 1M en
+        # vez de 200k. Asi el threshold queda en 900k (90% de 1M)
+        # y no en 180k.
+        known_ctx = _claude_code_known_context(cc_model)
+        # El threshold del auto-compact debe basarse en el context real
+        # (que viene del catalog de models.dev), no en el que Claude
+        # Code conoce internamente. Si el catalog dice 1M, threshold=900k.
+        threshold = int(real_ctx * 0.9)
         if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in os.environ:
             os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(threshold)
+        # Claude Code has its own catalog for Anthropic 1M models (via
+        # the [1m] suffix or internal lookup), so we don't need to
+        # override MAX_CONTEXT_TOKENS for them.
         os.environ.pop("DISABLE_AUTO_COMPACT", None)
         return {
             "real_ctx": real_ctx,
@@ -600,11 +611,42 @@ def apply_context_window_env(model_id: str, catalog: dict[str, dict[str, dict]] 
             "threshold": threshold,
             "auto_compact": True,
         }
+    # No-Anthropic: Claude Code no conoce estos modelos y mostraria el
+    # default de 200k en /context. Para que muestre el context real
+    # (400k, 512k, 270k, 170k, 1M, etc.) usamos dos env vars:
+    #
+    #   CLAUDE_CODE_MAX_CONTEXT_TOKENS=<real>
+    #     -> Claude Code lo lee y lo muestra en /context. Es la unica
+    #        forma de sobreescribir el display para modelos fuera de
+    #        su catalogo.
+    #
+    #   DISABLE_COMPACT=1
+    #     -> Requerido por Claude Code para que MAX_CONTEXT_TOKENS
+    #        tome efecto. Sin esto, MAX_CONTEXT_TOKENS se ignora y se
+    #        usa el flujo normal (w37 -> 200k para modelos
+    #        desconocidos).
+    #
+    #   CLAUDE_CODE_AUTO_COMPACT_WINDOW=<real * 0.9>
+    #     -> Threshold del auto-compact. Se setea igual que antes
+    #        para que compacte al 90% del context real, no del 200k
+    #        default.
+    #
+    # Importante: la logica de auto-compact en Claude Code revisa
+    # CLAUDE_CODE_AUTO_COMPACT_WINDOW directamente, asi que funciona
+    # aun con DISABLE_COMPACT=1 (DISABLE_COMPACT solo afecta el
+    # trigger automatico, no el threshold manual).
     cc_model = model_id_for_claude_code(model_id, provider_id, catalog)
     known_ctx = _claude_code_known_context(cc_model)
     threshold = int(real_ctx * 0.9)
     if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in os.environ:
         os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(threshold)
+    # Override del display para que /context muestre el context real.
+    if "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in os.environ:
+        os.environ["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(real_ctx)
+    # DISABLE_COMPACT=1 hace que Claude Code use MAX_CONTEXT_TOKENS
+    # en vez del flujo normal. Sin esto, Claude Code ignora
+    # MAX_CONTEXT_TOKENS y muestra 200k.
+    os.environ["DISABLE_COMPACT"] = "1"
     os.environ.pop("DISABLE_AUTO_COMPACT", None)
     return {
         "real_ctx": real_ctx,
