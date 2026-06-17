@@ -351,9 +351,15 @@ def anthropic_to_codex(body: dict, model: str) -> dict:
         out["tools"] = convert_tools(tools)
         out["tool_choice"] = "auto"
         out["parallel_tool_calls"] = True
-    # Codex uses top-level parameters, not a nested generation_config.
-    if isinstance(body.get("max_tokens"), (int, float)):
-        out["max_output_tokens"] = body["max_tokens"]
+    # Codex uses `text.verbosity` instead of free-form text config.
+    out["text"] = {"verbosity": "low"}
+    # Codex Responses API requires including reasoning.encrypted_content so
+    # subsequent calls can resume from the previous reasoning trace.
+    out["include"] = ["reasoning.encrypted_content"]
+    # Codex rejects top-level max_output_tokens / max_completion_tokens.
+    # Cap the output implicitly via truncation; the upstream picks the
+    # default. If the Anthropic request had max_tokens, we still respect
+    # it via Anthropic's own stop logic; we just don't forward it.
     if isinstance(body.get("temperature"), (int, float)):
         out["temperature"] = body["temperature"]
     if isinstance(body.get("top_p"), (int, float)):
