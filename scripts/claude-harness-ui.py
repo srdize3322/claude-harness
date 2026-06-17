@@ -158,7 +158,7 @@ PERMISSION_OPTIONS: dict[str, list[PermissionOption]] = {
         PermissionOption("Default", []),
         PermissionOption("On request", ["-a", "on-request"]),
         PermissionOption("Never ask", ["-a", "never"]),
-        PermissionOption("Dangerously bypass", ["--dangerously-bypass-approvals-and-sandbox"]),
+        PermissionOption("Dangerously bypass", ["--dangerously-skip-permissions"]),
     ],
 }
 
