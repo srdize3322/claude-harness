@@ -151,7 +151,6 @@ const HARDCODED_EFFORT_FALLBACK = {
   "deepseek-v4-pro": ["high", "max"],
   "deepseek-v4-flash": ["high", "max"],
   "kimi-k2.7-code": ["minimal", "low", "medium", "high"],
-  "qwen3.7-max": ["minimal", "low", "medium", "high"],
   "qwen3.7-plus": ["minimal", "low", "medium", "high"],
 };
 

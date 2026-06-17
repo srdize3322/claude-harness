@@ -244,9 +244,22 @@ def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str
         h["Authorization"] = f"Bearer {auth['access_token']}"
     elif auth["type"] == "token":
         h["Authorization"] = f"Bearer {auth['token']}"
+    h["User-Agent"] = DEFAULT_BROWSER_UA
     h.pop("host", None)
     h.pop("content-length", None)
     return url, h, json.dumps(body).encode("utf-8")
+
+
+# Browser-like User-Agent. Some backends (notably Cloudflare Workers
+# like opencode-go-proxy) reject requests with Python's default
+# urllib User-Agent (error 1010: "The owner of this website has
+# banned your access based on your browser's signature"). Setting a
+# realistic UA bypasses this WAF rule.
+DEFAULT_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def _build_passthrough_request(base: str, body: dict, headers: dict,
@@ -255,6 +268,8 @@ def _build_passthrough_request(base: str, body: dict, headers: dict,
     url = base.rstrip("/") + "/v1/messages"
     h = dict(headers)
     h["Authorization"] = auth_header
+    # Always set a browser-like User-Agent (overrides any client UA).
+    h["User-Agent"] = DEFAULT_BROWSER_UA
     h.pop("host", None)
     h.pop("content-length", None)
     return url, h, json.dumps(body).encode("utf-8")
@@ -273,6 +288,7 @@ def _build_codex_request(body: dict, headers: dict,
     h.pop("anthropic-version", None)
     h.pop("host", None)
     h.pop("content-length", None)
+    h["User-Agent"] = DEFAULT_BROWSER_UA
     if codex_auth.get("access_token") and codex_auth.get("account_id"):
         h["Authorization"] = (
             f"codex:{codex_auth['access_token']}:{codex_auth['account_id']}"

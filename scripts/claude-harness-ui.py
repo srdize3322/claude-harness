@@ -341,13 +341,11 @@ OPENCODE_GO_MODELS = [
     ModelItem("minimax-m3", "MiniMax M3", True, [{"type": "toggle"}]),
     ModelItem("deepseek-v4-pro", "DeepSeek V4 Pro", True, [{"type": "effort", "values": ["high", "max"]}]),
     ModelItem("deepseek-v4-flash", "DeepSeek V4 Flash", True, [{"type": "effort", "values": ["high", "max"]}]),
-    ModelItem("qwen3.7-max", "Qwen 3.7 Max", True, []),
     ModelItem("qwen3.7-plus", "Qwen 3.7 Plus", True, []),
     ModelItem("qwen3.5-plus", "Qwen 3.5 Plus", True, []),
     ModelItem("kimi-k2.7-code", "Kimi K2.7 Code", True, []),
     ModelItem("kimi-k2.6", "Kimi K2.6", True, []),
     ModelItem("mimo-v2.5-pro", "Mimo V2.5 Pro", True, []),
-    ModelItem("mimo-v2-omni", "Mimo V2 Omni", True, []),
     ModelItem("glm-5.1", "GLM 5.1", True, []),
     ModelItem("glm-5", "GLM 5", True, []),
 ]
