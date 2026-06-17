@@ -1134,7 +1134,7 @@ import curses.ascii
 import locale
 import subprocess
 
-PAGE_SIZE = 10
+PAGE_SIZE = 8
 KEY_CTRL_C = chr(3)
 KEY_CTRL_D = chr(4)
 KEY_CTRL_F = chr(6)
@@ -1808,15 +1808,18 @@ def _flatten_all_models_for_slots() -> list[tuple[str, str, str]]:
     return get_all_models_all_providers()
 
 
-def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> None:
+def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
+                       sub_stage: str = "provider",
+                       sub_prov: str | None = None,
+                       sub_models: list[tuple[str, str, str]] | None = None,
+                       sub_query: str = "",
+                       sub_scroll: int = 0,
+                       sub_sel: int = 0) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     draw_header(stdscr, f"Subagentes: {provider.label}", f"main = {main_model.label}")
-    safe_addstr(stdscr, 3, 0,
-                "  Enter: confirmar todo  Esc: usar main para todos  flechas: navegar", attr_pair(CP_DIM))
-    safe_addstr(stdscr, 4, 0, "")
 
-    # Slot headers
+    # Slot headers (always visible)
     section1_row = 5
     if stage == "sonnet":
         safe_addstr(stdscr, section1_row, 0, "  > slot sonnet:", attr_pair(CP_TITLE) | attr_bold())
@@ -1824,10 +1827,8 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> Non
         safe_addstr(stdscr, section1_row, 0, "    slot sonnet:", attr_pair(CP_DIM))
     sonnet_prov = infer_provider_for_model(sonnet) if sonnet else None
     sonnet_str = f"{sonnet} [{ALL_PROVIDER_LABELS.get(sonnet_prov, '?')}]" if sonnet else "= main (default)"
-    if sonnet:
-        safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}", attr_pair(CP_HINT))
-    else:
-        safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}", attr_pair(CP_DIM))
+    safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}",
+                attr_pair(CP_HINT) if sonnet else attr_pair(CP_DIM))
 
     section2_row = 6
     if stage == "haiku":
@@ -1836,113 +1837,250 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> Non
         safe_addstr(stdscr, section2_row, 0, "    slot haiku:", attr_pair(CP_DIM))
     haiku_prov = infer_provider_for_model(haiku) if haiku else None
     haiku_str = f"{haiku} [{ALL_PROVIDER_LABELS.get(haiku_prov, '?')}]" if haiku else "= main (default)"
-    if haiku:
-        safe_addstr(stdscr, section2_row, 16, f"  {haiku_str}", attr_pair(CP_HINT))
-    else:
-        safe_addstr(stdscr, section2_row, 16, f"  {haiku_str}", attr_pair(CP_DIM))
+    safe_addstr(stdscr, section2_row, 16, f"  {haiku_str}",
+                attr_pair(CP_HINT) if haiku else attr_pair(CP_DIM))
 
+    # Show sub-stage UI: provider picker or model picker
     list_start = 9
-    if stage == "sonnet":
-        current = sonnet
+    current_slot_value = sonnet if stage == "sonnet" else haiku
+    if sub_stage == "provider":
+        safe_addstr(stdscr, list_start - 1, 0,
+                    f"  Elegi provider para slot {stage}:", attr_pair(CP_HINT))
+        # Option: "= main" (uses main provider's main model)
+        row = list_start
+        if current_slot_value is None:
+            marker = ">"
+            attr = attr_pair(CP_SELECT) | attr_bold()
+        else:
+            marker = " "
+            attr = curses.A_NORMAL
+        safe_addstr(stdscr, row, 0,
+                    f"  {marker} = main  (default = {main_model.label})", attr)
+        # Provider options (max 6)
+        for i, prov_id in enumerate(ALL_PROVIDER_IDS):
+            row = list_start + 1 + i
+            if row >= h - 3:
+                break
+            is_sel = (sub_prov == prov_id)
+            marker = ">" if is_sel else " "
+            attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
+            safe_addstr(stdscr, row, 0,
+                        f"  {marker} {ALL_PROVIDER_LABELS.get(prov_id, prov_id)}",
+                        attr)
+        draw_footer(stdscr, "Enter: elegir  Esc: volver al slot anterior")
     else:
-        current = haiku
-
-    safe_addstr(stdscr, list_start - 1, 0,
-                "  Modelos disponibles (todos los providers):", attr_pair(CP_HINT))
-
-    # Row 1: "= main" option
-    if current is None:
-        marker = ">"
-        attr = attr_pair(CP_SELECT) | attr_bold()
-    else:
-        marker = " "
-        attr = curses.A_NORMAL
-    safe_addstr(stdscr, list_start, 0,
-                f"  {marker} = main  (default = {main_model.label})", attr)
-
-    # Then list all models from all providers, grouped by provider
-    all_models = _flatten_all_models_for_slots()
-    row = list_start + 1
-    current_prov = None
-    for model_id, label, prov_id in all_models:
-        if prov_id != current_prov:
-            # Section header
-            if row < h - 2:
-                safe_addstr(stdscr, row, 0,
-                            f"  -- {ALL_PROVIDER_LABELS.get(prov_id, prov_id)} --",
-                            attr_pair(CP_DIM))
-                row += 1
-            current_prov = prov_id
-        if row >= h - 2:
-            break
-        is_sel = (current is not None and current == model_id)
-        marker = ">" if is_sel else " "
-        attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
-        # Show short label
-        short = label.replace(f"[{ALL_PROVIDER_LABELS.get(prov_id, prov_id)}] ", "")
-        safe_addstr(stdscr, row, 0, f"  {marker} {short}  ({prov_id})", attr)
+        # sub_stage == "model": show model picker for sub_prov
+        prov_label = ALL_PROVIDER_LABELS.get(sub_prov, sub_prov or "?")
+        safe_addstr(stdscr, list_start - 1, 0,
+                    f"  Provider: {prov_label}    Tipea para buscar",
+                    attr_pair(CP_HINT))
+        # Search box
+        safe_addstr(stdscr, list_start, 0,
+                    f"  > {sub_query}_\b" if sub_query else "  > _\b",
+                    attr_pair(CP_TITLE) | attr_bold())
+        # Filter models by query
+        if sub_models is None:
+            sub_models = []
+        ql = sub_query.lower()
+        filtered = [m for m in sub_models
+                    if not ql or ql in m[0].lower() or ql in m[1].lower()]
+        # Visible window
+        total = len(filtered)
+        if sub_sel >= total:
+            sub_sel = max(0, total - 1)
+        if sub_sel < sub_scroll:
+            sub_scroll = sub_sel
+        if sub_sel >= sub_scroll + PAGE_SIZE:
+            sub_scroll = sub_sel - PAGE_SIZE + 1
+        visible = filtered[sub_scroll:sub_scroll + PAGE_SIZE]
+        row = list_start + 1
+        # First option: = main (if not in this provider)
+        is_main_selected = (sub_sel == 0)
+        marker = ">" if is_main_selected else " "
+        attr = attr_pair(CP_SELECT) | attr_bold() if is_main_selected else curses.A_NORMAL
+        safe_addstr(stdscr, row, 0,
+                    f"  {marker} = main  (default = {main_model.label})", attr)
         row += 1
-
-    if not all_models:
-        safe_addstr(stdscr, list_start + 1, 0,
-                    "  (no hay modelos cargados)", attr_pair(CP_DIM))
-
-    draw_footer(stdscr, "Enter: elegir  Esc: volver al slot anterior")
+        for mid, label, _ in visible:
+            if row >= h - 3:
+                break
+            is_sel = (sub_sel > 0 and filtered[sub_scroll + (sub_sel - 1)][0] == mid)
+            marker = ">" if is_sel else " "
+            attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
+            # Short label (strip [Provider] prefix for readability)
+            short = label.split("] ", 1)[-1] if "] " in label else label
+            safe_addstr(stdscr, row, 0, f"  {marker} {short}", attr)
+            row += 1
+        # Scroll info
+        if total > PAGE_SIZE:
+            safe_addstr(stdscr, h - 1, 0,
+                        f"  {sub_scroll + 1}-{min(total, sub_scroll + PAGE_SIZE)} de {total}",
+                        attr_pair(CP_DIM))
+        draw_footer(stdscr, "Enter: elegir  Esc: volver a providers  type: buscar")
 
 
 def pick_agent_slots(stdscr, provider, main_model) -> AgentSlots:
-    """Pick sonnet and haiku slots. Each slot can be any model from any
-    provider. If a slot uses a different provider than the main, the
-    caller should use the multi-provider launcher.
+    """Pick sonnet and haiku slots with provider -> model navigation.
+
+    Flow per slot:
+      1. Pick provider (= main | Anthropic | Codex | MiniMax | OpenRouter | OpenCode Go)
+      2. If a real provider: search/filter model list (max 8 visible)
+      3. Or stay on "= main" to use the main session's model
     """
     slots = AgentSlots()
     sonnet: str | None = None
     haiku: str | None = None
+    # Load all models grouped by provider for the slot picker
+    all_models_by_prov: dict[str, list[tuple[str, str, str]]] = {p: [] for p in ALL_PROVIDER_IDS}
+    for mid, label, prov in _flatten_all_models_for_slots():
+        if prov in all_models_by_prov:
+            all_models_by_prov[prov].append((mid, label, prov))
+    return _pick_slots_loop(stdscr, provider, main_model, slots,
+                            sonnet, haiku, all_models_by_prov)
+
+
+def _pick_slots_loop(stdscr, provider, main_model,
+                     slots: AgentSlots,
+                     sonnet: str | None, haiku: str | None,
+                     all_models_by_prov: dict) -> AgentSlots:
     stage = "sonnet"
     while True:
-        draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage)
-        stdscr.refresh()
-        key = stdscr.getch()
-        if key == -1:
-            continue
-        if key in (curses.KEY_ENTER, 10, 13):
-            # Confirm the current slot's selection and move on
-            if stage == "sonnet":
-                stage = "haiku"
+        sub_stage = "provider"
+        sub_prov: str | None = None
+        sub_models: list | None = None
+        sub_query = ""
+        sub_scroll = 0
+        sub_sel = 0
+        # Inner loop: navigate provider -> model -> done for this slot
+        while True:
+            draw_slots_picker(
+                stdscr, provider, main_model,
+                sonnet, haiku, stage,
+                sub_stage=sub_stage,
+                sub_prov=sub_prov,
+                sub_models=sub_models,
+                sub_query=sub_query,
+                sub_scroll=sub_scroll,
+                sub_sel=sub_sel,
+            )
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == -1:
                 continue
-            return AgentSlots(sonnet=sonnet, haiku=haiku)
-        if key == 27:  # ESC
-            if stage == "haiku":
-                stage = "sonnet"
-                continue
-            return AgentSlots()
-        if key in (KEY_CTRL_Q, ord("q"), ord("Q")):
-            return AgentSlots()
-        # Get the flat list of (model_id, label, prov_id)
-        all_models = _flatten_all_models_for_slots()
-        # Build the navigable list: [None (=main)] + all model_ids
-        nav_ids: list[str | None] = [None] + [m[0] for m in all_models]
-        current = sonnet if stage == "sonnet" else haiku
-        try:
-            cur_idx = nav_ids.index(current)
-        except ValueError:
-            cur_idx = 0
-        if key == curses.KEY_DOWN:
-            if cur_idx + 1 < len(nav_ids):
-                chosen = nav_ids[cur_idx + 1]
-                if stage == "sonnet":
-                    sonnet = chosen
+            if key == 27:  # ESC
+                if sub_stage == "model":
+                    sub_stage = "provider"
+                    sub_prov = None
+                    sub_models = None
+                    sub_query = ""
+                    sub_scroll = 0
+                    sub_sel = 0
+                    continue
+                # Back out of slot picker entirely
+                if stage == "haiku":
+                    stage = "sonnet"
                 else:
-                    haiku = chosen
-            continue
-        if key == curses.KEY_UP:
-            if cur_idx > 0:
-                chosen = nav_ids[cur_idx - 1]
-                if stage == "sonnet":
-                    sonnet = chosen
+                    return AgentSlots()
+                break
+            if sub_stage == "provider":
+                # Provider picker
+                if key in (curses.KEY_ENTER, 10, 13):
+                    # Selection: 0 = "= main", 1..len = providers
+                    if sub_sel == 0:
+                        # Use main model
+                        if stage == "sonnet":
+                            sonnet = None
+                        else:
+                            haiku = None
+                    else:
+                        idx = sub_sel - 1
+                        if 0 <= idx < len(ALL_PROVIDER_IDS):
+                            sub_prov = ALL_PROVIDER_IDS[idx]
+                            sub_models = all_models_by_prov.get(sub_prov, [])
+                            sub_stage = "model"
+                            sub_query = ""
+                            sub_scroll = 0
+                            sub_sel = 0
+                            continue
+                elif key == curses.KEY_DOWN:
+                    sub_sel = min(len(ALL_PROVIDER_IDS), sub_sel + 1)
+                elif key == curses.KEY_UP:
+                    sub_sel = max(0, sub_sel - 1)
                 else:
-                    haiku = chosen
-            continue
+                    # Accept arrow letters as provider shortcuts
+                    if key in (ord("a"), ord("A")):
+                        sub_sel = 1
+                    elif key in (ord("c"), ord("C")):
+                        sub_sel = 2
+                    elif key in (ord("m"), ord("M")):
+                        sub_sel = 3
+                    elif key in (ord("o"), ord("O")):
+                        sub_sel = 4
+                    elif key in (ord("g"), ord("G")):
+                        sub_sel = 5
+            else:
+                # Model picker
+                if key in (curses.KEY_ENTER, 10, 13):
+                    if sub_sel == 0:
+                        # "= main"
+                        if stage == "sonnet":
+                            sonnet = None
+                        else:
+                            haiku = None
+                    else:
+                        ql = sub_query.lower()
+                        filtered = [m for m in (sub_models or [])
+                                    if not ql or ql in m[0].lower() or ql in m[1].lower()]
+                        idx = sub_sel - 1
+                        if 0 <= idx < len(filtered):
+                            chosen = filtered[idx][0]
+                            if stage == "sonnet":
+                                sonnet = chosen
+                            else:
+                                haiku = chosen
+                    # Move to next slot or finish
+                    if stage == "sonnet":
+                        stage = "haiku"
+                    else:
+                        return AgentSlots(sonnet=sonnet, haiku=haiku)
+                    break
+                elif key == curses.KEY_DOWN:
+                    ql = sub_query.lower()
+                    filtered = [m for m in (sub_models or [])
+                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
+                    sub_sel = min(1 + len(filtered), sub_sel + 1)
+                elif key == curses.KEY_UP:
+                    sub_sel = max(0, sub_sel - 1)
+                elif key == curses.KEY_PPAGE:
+                    sub_sel = max(0, sub_sel - PAGE_SIZE)
+                elif key == curses.KEY_NPAGE:
+                    ql = sub_query.lower()
+                    filtered = [m for m in (sub_models or [])
+                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
+                    sub_sel = min(1 + len(filtered), sub_sel + PAGE_SIZE)
+                elif key == curses.KEY_HOME:
+                    sub_sel = 0
+                elif key == curses.KEY_END:
+                    ql = sub_query.lower()
+                    filtered = [m for m in (sub_models or [])
+                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
+                    sub_sel = 1 + len(filtered) - 1
+                elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+                    if sub_query:
+                        sub_query = sub_query[:-1]
+                        sub_sel = 0
+                        sub_scroll = 0
+                elif key in (KEY_CTRL_Q, ord("q"), ord("Q"), KEY_CTRL_C, 3):
+                    return AgentSlots()
+                else:
+                    if 32 <= key <= 126:
+                        sub_query += chr(key)
+                        sub_sel = 0
+                        sub_scroll = 0
+                    elif key == ord(" "):
+                        sub_query += " "
+                        sub_sel = 0
+                        sub_scroll = 0
 
 
 def apply_provider_env(provider: ProviderDefinition) -> None:
