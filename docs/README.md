@@ -6,7 +6,7 @@
 ╭─── Claude Code v2.1.178 ────────────╮
 │  Bienvenido                          │
 │  MiniMax-M3[1m] with high effort      │  ← provider + model + thinking level
-│  /Users/santiago                     │
+│  ~/tu/proyecto                       │
 ╰──────────────────────────────────────╯
 ❯ /context
    31.9k/460.8k tokens (7%)              ← context real del modelo (no fake 200k)
