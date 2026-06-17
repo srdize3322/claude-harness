@@ -1,10 +1,232 @@
 #!/usr/bin/env bash
+# claude-codex — lanza Claude Code con Codex (OpenAI) como backend via proxy.
+# Lee ~/.codex/auth.json, refresca el access_token si hace falta, y exporta las
+# env vars correctas para que el Worker traduzca Anthropic <-> OpenAI Responses.
 set -euo pipefail
 
-cat >&2 <<'EOF'
-claude-codex fue deshabilitado.
+HARNESS_ENV_FILE="$HOME/.config/claude-harness/.env"
+CODEX_AUTH_JSON="${CODEX_AUTH_JSON:-$HOME/.codex/auth.json}"
+CLAUDE_BIN="$HOME/.local/bin/claude"
+CODEX_OAUTH_URL="https://auth.openai.com/oauth/token"
+CODEX_CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann"
+DEFAULT_MODEL="gpt-5.4"
+REFRESH_MARGIN=300  # 5 min antes de exp
 
-Este harness puede dejar listo el login de Codex, incluyendo device auth, pero no abrira Codex como si fuera Claude Code.
-Usa `codex` directamente si quieres abrir su cliente.
-EOF
-exit 1
+load_env_file() {
+  local path=$1
+  if [ -f "$path" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$path"
+    set +a
+  fi
+}
+
+die()  { echo "claude-codex: $*" >&2; exit 1; }
+log()  { echo "claude-codex: $*" >&2; }
+has()  { command -v "$1" >/dev/null 2>&1; }
+
+# Trap para limpiar temp files. Se setea antes de crear TMP.
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+[ "${CODEX_DEBUG:-0}" = "1" ] && set -x
+
+load_env_file "$HARNESS_ENV_FILE"
+
+# codex CLI solo se usa para sugerir comandos de login en mensajes de error.
+# El refresh real lo hace Python con urllib (sin dependencia de curl).
+has codex || log "codex CLI no encontrado (opcional, sirve solo para sugerir login)"
+
+[ -f "$CODEX_AUTH_JSON" ] \
+  || die "No se encontró $CODEX_AUTH_JSON. Corré: codex login --device-auth"
+
+# Avisar si los permisos de auth.json no son 600 (defense in depth).
+if has stat; then
+  perms=$(stat -f "%Lp" "$CODEX_AUTH_JSON" 2>/dev/null || stat -c "%a" "$CODEX_AUTH_JSON" 2>/dev/null || echo "")
+  if [ -n "$perms" ] && [ "$perms" != "600" ] && [ "$perms" != "400" ]; then
+    log "AVISO: $CODEX_AUTH_JSON tiene permisos $perms (recomendado: 600)"
+  fi
+fi
+
+# Parsear auth.json. Emitimos cada campo en una línea (no en una sola línea
+# separada por espacios) porque los tokens pueden contener caracteres que
+# rompen IFS. Usamos un temp file para evitar los problemas de process
+# substitution con set -e.
+if ! python3 - "$CODEX_AUTH_JSON" > "$TMP" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+mode = d.get("auth_mode")
+if mode == "apikey":
+    print(f"AUTH_MODE={mode}")
+    print(f"API_KEY={d.get('OPENAI_API_KEY') or ''}")
+    print("ACCESS_TOKEN=")
+    print("REFRESH_TOKEN=")
+    print(f"ACCOUNT_ID={d.get('account_id', '')}")
+elif mode == "chatgpt":
+    t = d.get("tokens") or {}
+    print(f"AUTH_MODE={mode}")
+    print("API_KEY=")
+    print(f"ACCESS_TOKEN={t.get('access_token', '')}")
+    print(f"REFRESH_TOKEN={t.get('refresh_token', '')}")
+    print(f"ACCOUNT_ID={t.get('account_id', '')}")
+else:
+    sys.exit(f"auth_mode '{mode}' no soportado (esperado: chatgpt o apikey)")
+PY
+then
+  die "auth.json inválido o corrupto"
+fi
+
+# shellcheck disable=SC1090
+. "$TMP"
+
+[ -n "$AUTH_MODE" ] || die "auth.json no contiene auth_mode"
+
+# Refrescar access_token si está vencido o por vencer (solo chatgpt mode).
+# El apikey mode no expira. El refresh lo hace Python con urllib para no
+# depender de curl, y persiste atómicamente con os.replace().
+if [ "$AUTH_MODE" = "chatgpt" ]; then
+  [ -n "$REFRESH_TOKEN" ] || die "Sin refresh_token. Re-loginear con: codex login"
+
+  if ! NEW_ACCESS_TOKEN=$(
+    OAUTH_URL="$CODEX_OAUTH_URL" \
+    OAUTH_CLIENT_ID="$CODEX_CLIENT_ID" \
+    REFRESH_M="$REFRESH_MARGIN" \
+    python3 - "$CODEX_AUTH_JSON" "$REFRESH_TOKEN" <<'PY'
+import sys, json, base64, os, urllib.request, urllib.error, urllib.parse, pathlib
+from datetime import datetime, timezone
+
+auth_path = pathlib.Path(sys.argv[1])
+refresh_token = sys.argv[2]
+oauth_url = os.environ["OAUTH_URL"]
+client_id = os.environ["OAUTH_CLIENT_ID"]
+refresh_margin = int(os.environ["REFRESH_M"])
+data = json.loads(auth_path.read_text())
+t = data.get("tokens") or {}
+access_token = t.get("access_token", "")
+
+def decode_exp(jwt):
+    try:
+        payload = jwt.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:
+        return 0
+
+exp = decode_exp(access_token)
+now = int(datetime.now(timezone.utc).timestamp())
+if exp - now >= refresh_margin:
+    print("SKIP")
+    sys.exit(0)
+
+body = urllib.parse.urlencode({
+    "grant_type": "refresh_token",
+    "refresh_token": refresh_token,
+    "client_id": client_id,
+    "scope": "openid profile email offline_access api.connectors.read api.connectors.write api.conversations.write",
+}).encode()
+req = urllib.request.Request(
+    oauth_url,
+    data=body,
+    headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        new = json.loads(resp.read())
+except urllib.error.HTTPError as e:
+    try:
+        err_body = json.loads(e.read() or b"{}")
+        err = err_body.get("error", "unknown")
+    except Exception:
+        err = "unknown"
+    sys.exit(f"refresh falló: HTTP {e.code} {e.reason} ({err})")
+except urllib.error.URLError as e:
+    sys.exit(f"refresh falló: {e.reason}")
+except Exception as e:
+    sys.exit(f"refresh falló: {e}")
+
+for k in ("access_token", "id_token", "refresh_token"):
+    if k not in new:
+        sys.exit(f"respuesta inválida: falta {k}")
+
+data["tokens"]["access_token"] = new["access_token"]
+data["tokens"]["id_token"] = new["id_token"]
+data["tokens"]["refresh_token"] = new["refresh_token"]
+data["last_refresh"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+tmp = auth_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2))
+os.chmod(tmp, 0o600)
+os.replace(tmp, auth_path)
+
+print(new["access_token"])
+PY
+  ); then
+    die "Refresh OAuth falló. Re-loginear con: codex login"
+  fi
+
+  if [ "$NEW_ACCESS_TOKEN" != "SKIP" ]; then
+    log "Access token refrescado"
+    ACCESS_TOKEN="$NEW_ACCESS_TOKEN"
+  fi
+fi
+
+# Wire format: el proxy detecta el prefijo "codex:" y rutea al handler de Codex.
+# Usamos "codex:" en ambos modos (apikey y chatgpt) para que el proxy sepa
+# que es tráfico Codex. En apikey mode, account_id puede ser vacío; usamos
+# "apikey" como placeholder para que parseCodexAuth no rechace el header.
+case "$AUTH_MODE" in
+  apikey)
+    [ -n "$API_KEY" ] || die "auth_mode=apikey pero OPENAI_API_KEY está vacío"
+    EFFECTIVE_ACCOUNT_ID="${ACCOUNT_ID:-apikey}"
+    export ANTHROPIC_AUTH_TOKEN="codex:${API_KEY}:${EFFECTIVE_ACCOUNT_ID}"
+    ;;
+  chatgpt)
+    [ -n "$ACCESS_TOKEN" ] || die "auth_mode=chatgpt pero access_token está vacío"
+    export ANTHROPIC_AUTH_TOKEN="codex:${ACCESS_TOKEN}:${ACCOUNT_ID}"
+    ;;
+esac
+unset ANTHROPIC_API_KEY
+
+# Validar proxy URL
+[ -n "${CLAUDE_HARNESS_CODEX_PROXY_URL:-}" ] \
+  || die "CLAUDE_HARNESS_CODEX_PROXY_URL no configurada. Agregala a ~/.config/claude-harness/.env"
+
+# Soft warning si el proxy URL no es HTTPS
+case "${CLAUDE_HARNESS_CODEX_PROXY_URL}" in
+  https://*) ;;
+  *) log "AVISO: CLAUDE_HARNESS_CODEX_PROXY_URL no es HTTPS (recomendado: https://...)" ;;
+esac
+
+export ANTHROPIC_BASE_URL="$CLAUDE_HARNESS_CODEX_PROXY_URL"
+export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+
+# Modelo: env var > default
+MODEL="${CLAUDE_HARNESS_CODEX_MODEL:-$DEFAULT_MODEL}"
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDE_HARNESS_SLOT_OPUS:-$MODEL}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDE_HARNESS_SLOT_SONNET:-$MODEL}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDE_HARNESS_SLOT_HAIKU:-$MODEL}"
+
+# Launch — inyectar --model solo si el user no pasó -m/--model/-h/-v
+should_inject_default_model=true
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|-h|--help|-v|--version)
+      should_inject_default_model=false
+      ;;
+  esac
+done
+
+declare -a launch_args
+launch_args=("$CLAUDE_BIN")
+if [ "$should_inject_default_model" = true ] && [ -n "${CLAUDE_HARNESS_CODEX_MODEL:-}" ]; then
+  launch_args+=("--model" "$CLAUDE_HARNESS_CODEX_MODEL")
+fi
+
+# Cleanup antes de exec (exec no dispara el trap EXIT).
+rm -f "$TMP"
+trap - EXIT
+
+exec "${launch_args[@]}" "$@"
