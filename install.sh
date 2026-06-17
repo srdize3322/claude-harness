@@ -119,12 +119,32 @@ download() {
         return 0
       fi
     fi
-    # Fallback: try raw.githubusercontent.com with cache-bust query
-    local url="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$REPO_BRANCH/$src?ts=$(date +%s)"
+    # Fallback 1: try raw.githubusercontent.com with cache-bust query
+    local url="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$REPO_BRANCH/$src?ts=$(date +%s%N)"
     if curl -fsSL --connect-timeout 10 -o "$dst" "$url" 2>/dev/null; then
       chmod +x "$dst" 2>/dev/null || true
-      dim "$src (fallback)"
+      dim "$src (raw)"
       return 0
+    fi
+    # Fallback 2: download the full tarball and extract just this file.
+    # Tarballs are versioned by commit SHA so CDN can't serve stale content.
+    local tar_url="https://codeload.github.com/${GITHUB_REPO#https://github.com/}/tar.gz/$REPO_BRANCH"
+    if command -v tar >/dev/null 2>&1; then
+      local tmp_tar
+      tmp_tar="$(mktemp)"
+      if curl -fsSL --connect-timeout 30 -o "$tmp_tar" "$tar_url" 2>/dev/null; then
+        # Find the file in the tarball (top-level dir is "<repo>-<sha>")
+        if tar -tzf "$tmp_tar" 2>/dev/null | grep -E "/${src}\$" >/dev/null 2>&1; then
+          tar -xzf "$tmp_tar" -C "$(dirname "$dst")" --strip-components=1 \
+            "$(tar -tzf "$tmp_tar" 2>/dev/null | grep -E "/${src}\$" | head -1 | xargs -I{} dirname {} | sed 's|/[^/]*$||')/${src}" \
+            2>/dev/null \
+            && chmod +x "$dst" 2>/dev/null \
+            && dim "$src (tarball)" \
+            && rm -f "$tmp_tar" \
+            && return 0
+        fi
+        rm -f "$tmp_tar"
+      fi
     fi
   else
     local url="$BASE_URL/$src"
