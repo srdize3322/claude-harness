@@ -381,7 +381,40 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
         if not proxy_url:
             return ProviderStatus(False, "falta proxy URL (Ctrl+L)")
         return ProviderStatus(True, "ok")
+    if provider.provider_id == "multi":
+        # Multi-provider is "logged in" if at least 2 backends have auth
+        # (otherwise just use that single backend directly)
+        available = sum([
+            # Anthropic: check OAuth file
+            bool(_read_json_file("~/.claude/.credentials.json") or {}),
+            # Codex: check auth file
+            bool(_read_json_file("~/.codex/auth.json") or {}),
+            bool(get_minimax_api_key()),
+            bool(get_openrouter_api_key()),
+            bool(_opencode_key("opencode-go")),
+        ])
+        if available < 2:
+            return ProviderStatus(
+                False, f"necesita 2+ providers ({available}/5)"
+            )
+        return ProviderStatus(True, f"{available} providers ok")
     return ProviderStatus(False, "desconocido")
+
+
+def _read_json_file(path: str) -> dict | None:
+    """Read a JSON file and return the parsed object, or None."""
+    import json as _json
+    try:
+        with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+            return _json.load(f)
+    except (OSError, _json.JSONDecodeError):
+        return None
+
+
+def _opencode_key(provider_id: str) -> str:
+    """Get an API key from the opencode auth.json file."""
+    auth = load_opencode_auth()
+    return auth.get(provider_id, {}).get("key", "")
 
 
 def get_default_model(provider: ProviderDefinition) -> str | None:
@@ -645,6 +678,11 @@ def is_anthropic_model(model_id: str | None, provider_id: str | None) -> bool:
     if provider_id == "openrouter" and model_id:
         ml = model_id.lower()
         return ml.startswith("anthropic/") or "/claude-" in ml
+    if provider_id == "multi" and model_id:
+        # For multi-provider, the [1m] decision is based on the model
+        # itself (only Claude models get the suffix).
+        ml = model_id.lower()
+        return ml.startswith("claude-") or ml.startswith("claude_")
     return False
 
 
@@ -838,6 +876,16 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
         models = MINIMAX_MODELS
     elif provider.provider_id == "opencode-go":
         models = OPENCODE_GO_MODELS
+    elif provider.provider_id == "multi":
+        # Multi-provider: aggregate one representative model from each
+        # backend so the user has something to pick as the "main". The
+        # real configuration happens in the slot picker (where they can
+        # pick from any provider).
+        models = [
+            ModelItem("claude-opus-4-6", "claude-opus-4-6 (Anthropic)"),
+            ModelItem("gpt-5.4", "gpt-5.4 (Codex)"),
+            ModelItem("MiniMax-M3", "MiniMax-M3 (MiniMax)"),
+        ]
     else:
         models = [ModelItem("default", "Default")]
     models = enrich_models_with_reasoning(provider.provider_id, models)
@@ -1338,6 +1386,16 @@ def pick_provider(stdscr) -> ProviderDefinition | None:
         elif key in (curses.KEY_ENTER, 10, 13):
             p = PROVIDERS[index]
             if not statuses[index].logged_in:
+                # Multi-provider has no login of its own; it just needs
+                # 2+ other backends logged in. If we get here, show the
+                # message and don't try to run the login menu.
+                if p.provider_id == "multi":
+                    show_message(stdscr, [
+                        p.label,
+                        statuses[index].detail,
+                        "Logueate en 2+ providers primero.",
+                    ])
+                    continue
                 if run_login_menu(stdscr, p):
                     statuses = [get_provider_status(pp) for pp in PROVIDERS]
                 continue
