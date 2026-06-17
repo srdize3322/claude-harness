@@ -710,6 +710,19 @@ def _normalize_model_id_for_context(model_id: str, provider_id: str | None,
     return lookup_model_id
 
 
+def _display_model_id(model_id: str, provider_id: str | None,
+                      catalog: dict[str, dict[str, dict]] | None) -> str:
+    if not model_id or model_id == "default":
+        return model_id
+    normalized = _normalize_model_id_for_context(model_id, provider_id, catalog)
+    return normalized or model_id
+
+
+def _use_plain_claude_defaults(provider: ProviderDefinition | None,
+                               model: ModelItem | None) -> bool:
+    return bool(provider and model and provider.provider_id == "claude" and model.model_id == "default")
+
+
 def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None,
                        provider_id: str | None = None) -> dict | None:
     if not catalog:
@@ -1692,7 +1705,8 @@ def run_login_menu(stdscr, provider) -> bool:
 def draw_model_list(stdscr, provider, models, filtered, favs, default_model,
                     query: str, show_favs_only: bool, scroll: int, sel: int,
                     error: str = "", wizard_state: WizardState | None = None,
-                    subtitle_override: str | None = None) -> None:
+                    subtitle_override: str | None = None,
+                    catalog: dict[str, dict[str, dict]] | None = None) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     subtitle = subtitle_override or f"{provider.label}  |  {len(filtered)} modelos"
@@ -1736,8 +1750,9 @@ def draw_model_list(stdscr, provider, models, filtered, favs, default_model,
             attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
             safe_addstr(stdscr, y, 0, line, attr)
             if is_sel and m.model_id and m.model_id != m.label and m.model_id != "default":
+                display_id = _display_model_id(m.model_id, provider.provider_id, catalog)
                 id_attr = attr_pair(CP_DIM) | attr_bold()
-                safe_addstr(stdscr, y, len(line) + 2, f"  [{m.model_id}]", id_attr)
+                safe_addstr(stdscr, y, len(line) + 2, f"  [{display_id}]", id_attr)
         if len(filtered) > PAGE_SIZE:
             info = f" {scroll+1}-{min(len(filtered), scroll+PAGE_SIZE)} de {len(filtered)}"
             safe_addstr(stdscr, h - 2, w - len(info) - 1, info, attr_pair(CP_DIM))
@@ -1780,6 +1795,7 @@ def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) 
     show_favs_only = False
     scroll = 0
     sel = 0
+    catalog = fetch_models_dev_catalog(force=False)
 
     while True:
         if selected_provider_id is None:
@@ -1875,6 +1891,7 @@ def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) 
                 f"Multi-provider  |  {ALL_PROVIDER_LABELS.get(selected_provider_id, selected_provider_id)}"
                 f"  |  {len(filtered)} modelos"
             ),
+            catalog=catalog,
         )
         stdscr.refresh()
         key = stdscr.getch()
@@ -1942,6 +1959,7 @@ def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) 
 def pick_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
     if provider.provider_id == "multi":
         return pick_multi_provider_main_model(stdscr, provider, wizard_state)
+    catalog = fetch_models_dev_catalog(force=False)
     try:
         models = fetch_models_for_provider(provider, force_refresh=True)
     except Exception as e:
@@ -1971,7 +1989,7 @@ def pick_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
         if sel >= scroll + PAGE_SIZE:
             scroll = sel - PAGE_SIZE + 1
         draw_model_list(stdscr, provider, models, filtered, favs, default_model,
-                        query, show_favs_only, scroll, sel, error, wizard_state)
+                        query, show_favs_only, scroll, sel, error, wizard_state, catalog=catalog)
         stdscr.refresh()
         key = stdscr.getch()
         if key == -1:
@@ -2193,10 +2211,11 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots,
         "Listo para abrir Claude Code",
         subtitle="revisa la configuración antes de lanzar",
     )
+    use_plain_defaults = _use_plain_claude_defaults(provider, model)
     caps = detect_thinking_capabilities(model.model_id, model.reasoning_options or [])
     payload = build_thinking_params(thinking_level, caps)
     catalog = fetch_models_dev_catalog(force=False)
-    ctx_info = apply_context_window_env(model.model_id, catalog, provider.provider_id)
+    ctx_info = None if use_plain_defaults else apply_context_window_env(model.model_id, catalog, provider.provider_id)
     real_ctx = ctx_info["real_ctx"] if ctx_info else 0
     known_ctx = ctx_info["known_ctx"] if ctx_info else 200000
     auto_compact = ctx_info["auto_compact"] if ctx_info else True
@@ -2214,16 +2233,25 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots,
             ctx_line = f"Context:   real={real_str}  AUTO-COMPACT OFF (usar /compact manual)"
         else:
             ctx_line = f"Context:   {known_str} tokens  AUTO-COMPACT OFF (usar /compact manual)"
-    lines = [
-        f"Proveedor: {provider.label}",
-        f"Modelo:    {model.label}  ({model.model_id})",
-        ctx_line,
-        f"Thinking:  {thinking_level}  ->  {format_thinking_params(payload)}",
-        f"Permisos:  {permission.label}",
-    ]
+    if use_plain_defaults:
+        lines = [
+            f"Proveedor: {provider.label}",
+            "Modelo:    Default de Claude Code (sin override del harness)",
+            "Context:   lo maneja Claude Code segun su configuracion normal",
+            "Thinking:  lo maneja Claude Code",
+            f"Permisos:  {permission.label}",
+        ]
+    else:
+        lines = [
+            f"Proveedor: {provider.label}",
+            f"Modelo:    {model.label}  ({model.model_id})",
+            ctx_line,
+            f"Thinking:  {thinking_level}  ->  {format_thinking_params(payload)}",
+            f"Permisos:  {permission.label}",
+        ]
     for i, line in enumerate(lines):
         safe_addstr(stdscr, row + i, 0, line, attr_pair(CP_DIM) if i > 0 else attr_pair(CP_TITLE) | attr_bold())
-    if slots and (slots.opus or slots.sonnet or slots.haiku):
+    if (not use_plain_defaults) and slots and (slots.opus or slots.sonnet or slots.haiku):
         safe_addstr(stdscr, row + 5, 0, "Subagentes:", attr_pair(CP_TITLE) | attr_bold())
         main = model.model_id
         opus_str = slots.opus if slots.opus else f"{main} (= main)"
@@ -2233,7 +2261,9 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots,
         safe_addstr(stdscr, row + 7, 0, f"  sonnet: {sonnet_str}", attr_pair(CP_DIM))
         safe_addstr(stdscr, row + 8, 0, f"  haiku:  {haiku_str}", attr_pair(CP_DIM))
     hint = ""
-    if thinking_level == "off":
+    if use_plain_defaults:
+        hint = "Se abrira como `claude` normal, solo aplicando el modo de permisos elegido."
+    elif thinking_level == "off":
         hint = "Thinking desactivado (CLAUDE_CODE_DISABLE_THINKING=1)"
     elif thinking_level in CLAUDE_EFFORT_LEVELS:
         hint = f"Despues de abrir, ejecuta: /effort {thinking_level}"
@@ -2631,7 +2661,7 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
             state.thinking = None
             state.permission = None
             state.slots = AgentSlots()
-            step = "thinking"
+            step = "permission" if _use_plain_claude_defaults(state.provider, state.model) else "thinking"
             continue
 
         if step == "thinking":
@@ -2667,7 +2697,10 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
                 print("\nInterrumpido.")
                 return
             if result.action == "back":
-                step = "slots"
+                if _use_plain_claude_defaults(state.provider, state.model):
+                    step = "model"
+                else:
+                    step = "slots"
                 continue
             state.permission = result.value
             step = "confirm"
@@ -2696,10 +2729,25 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
 
 def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
            permission: PermissionOption, slots: AgentSlots, extra_args: list[str]) -> None:
-    if thinking_level == "off":
+    use_plain_defaults = _use_plain_claude_defaults(provider, model)
+    if thinking_level == "off" and not use_plain_defaults:
         os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
+    elif use_plain_defaults:
+        for env_key in (
+            "CLAUDE_CODE_DISABLE_THINKING",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            "DISABLE_COMPACT",
+            "DISABLE_AUTO_COMPACT",
+            "CLAUDE_HARNESS_SLOT_OPUS",
+            "CLAUDE_HARNESS_SLOT_SONNET",
+            "CLAUDE_HARNESS_SLOT_HAIKU",
+            "CLAUDE_HARNESS_SLOT_MAIN",
+        ):
+            os.environ.pop(env_key, None)
     catalog = fetch_models_dev_catalog(force=False)
-    apply_context_window_env(model.model_id, catalog, provider.provider_id)
+    if not use_plain_defaults:
+        apply_context_window_env(model.model_id, catalog, provider.provider_id)
     # The smart proxy is used only when the main provider is the
     # explicit multi-provider mode.
     is_multi = is_multi_provider_needed(provider.provider_id, slots)
@@ -2712,19 +2760,19 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
             val = getattr(slots, slot_name)
             if val and "/" in val:
                 setattr(slots, slot_name, val.split("/", 1)[1])
-    if slots.opus:
+    if not use_plain_defaults and slots.opus:
         os.environ["CLAUDE_HARNESS_SLOT_OPUS"] = slots.opus
-    if slots.sonnet:
+    if not use_plain_defaults and slots.sonnet:
         os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
-    if slots.haiku:
+    if not use_plain_defaults and slots.haiku:
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
-    if effective_provider.provider_id == "multi":
+    if not use_plain_defaults and effective_provider.provider_id == "multi":
         os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
     apply_provider_env(effective_provider)
     args = [effective_provider.launcher]
     cc_model = model_id_for_claude_code(
         model.model_id, effective_provider.provider_id, catalog)
-    if cc_model != "default":
+    if not use_plain_defaults and cc_model != "default":
         args.extend(["--model", cc_model])
     args.extend(permission.args)
     args.extend(extra_args)
