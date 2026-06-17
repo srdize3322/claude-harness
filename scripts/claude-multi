@@ -18,8 +18,13 @@ CODEX_PROXY="${CODEX_PROXY:-$SCRIPT_DIR/codex-proxy.py}"
 SMART_HOST="${CLAUDE_HARNESS_SMART_PROXY_HOST:-127.0.0.1}"
 SMART_PORT="${CLAUDE_HARNESS_SMART_PROXY_PORT:-8081}"
 CODEX_PORT="${CLAUDE_HARNESS_CODEX_PROXY_PORT:-8080}"
+MULTI_VERBOSE="${CLAUDE_HARNESS_MULTI_VERBOSE:-0}"
 
-log() { printf "[claude-multi] %s\n" "$*" >&2; }
+log() {
+  if [ "$MULTI_VERBOSE" = "1" ]; then
+    printf "[claude-multi] %s\n" "$*" >&2
+  fi
+}
 die() { printf "[claude-multi] ERROR: %s\n" "$*" >&2; exit 1; }
 
 # Sanity checks

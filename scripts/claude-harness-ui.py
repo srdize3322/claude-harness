@@ -278,8 +278,19 @@ def infer_provider_for_model(model_id: str | None) -> str | None:
 
 
 def is_multi_provider_needed(main_provider: str | None, slots: AgentSlots) -> bool:
-    """The smart proxy is reserved for explicit multi-provider sessions."""
-    return main_provider == "multi"
+    """True if any slot uses a different provider than the main one.
+    Used to decide whether to launch via the single-provider wrapper
+    or the multi-provider smart proxy.
+    """
+    if main_provider is None:
+        return False
+    for slot_value in (slots.opus, slots.sonnet, slots.haiku):
+        if not slot_value:
+            continue
+        prov = infer_provider_for_model(slot_value)
+        if prov and prov != main_provider:
+            return True
+    return False
 
 
 PROVIDERS = [

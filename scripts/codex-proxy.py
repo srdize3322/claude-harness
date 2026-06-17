@@ -113,6 +113,40 @@ def map_status_to_error_type(status: int) -> str:
     return "api_error"
 
 
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return int((len(text) + 3) / 3.5)
+
+
+def estimate_message_tokens(messages) -> int:
+    total = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+            continue
+        if not isinstance(content, list):
+            total += estimate_tokens(str(content))
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                total += estimate_tokens(block.get("text", ""))
+            elif btype == "tool_use":
+                total += estimate_tokens(json.dumps(block.get("input"))) + 10
+            elif btype == "tool_result":
+                result_content = block.get("content")
+                if not isinstance(result_content, str):
+                    result_content = json.dumps(result_content)
+                total += estimate_tokens(result_content)
+    return total
+
+
 def parse_codex_error_body(body):
     """Mirror codex-handler.js parseCodexErrorBody."""
     if body is None:
@@ -811,6 +845,9 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         self._json_response(404, {"error": "not found"})
 
     def do_POST(self):
+        if self._route() == "/v1/messages/count_tokens":
+            self._handle_count_tokens()
+            return
         if self._route() != "/v1/messages":
             self._json_response(404, {"error": "not found"})
             return
@@ -843,6 +880,16 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
             return self.rfile.read(int(length))
         except Exception:
             return b""
+
+    def _handle_count_tokens(self) -> None:
+        body_bytes = self._read_body()
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+        except json.JSONDecodeError:
+            self._json_response(200, {"input_tokens": 0})
+            return
+        input_tokens = max(estimate_message_tokens(body.get("messages", [])), 1)
+        self._json_response(200, {"input_tokens": input_tokens})
 
     # ---- Main handler ----
 

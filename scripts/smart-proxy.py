@@ -54,6 +54,40 @@ CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
 OPENCODE_AUTH_PATH = os.path.expanduser("~/.local/share/opencode/auth.json")
 
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return int((len(text) + 3) / 3.5)
+
+
+def estimate_message_tokens(messages) -> int:
+    total = 0
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+            continue
+        if not isinstance(content, list):
+            total += estimate_tokens(str(content))
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                total += estimate_tokens(block.get("text", ""))
+            elif btype == "tool_use":
+                total += estimate_tokens(json.dumps(block.get("input"))) + 10
+            elif btype == "tool_result":
+                result_content = block.get("content")
+                if not isinstance(result_content, str):
+                    result_content = json.dumps(result_content)
+                total += estimate_tokens(result_content)
+    return total
+
 # ---------------------------------------------------------------------------
 # Auth loading
 # ---------------------------------------------------------------------------
@@ -274,6 +308,9 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         if not self.path.startswith("/v1/messages"):
             self.send_error(404, "Not Found")
             return
+        if "count_tokens" in self.path:
+            self._handle_count_tokens()
+            return
         self._handle_messages()
 
     def _json(self, status: int, body: dict):
@@ -290,6 +327,15 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         if length <= 0:
             return b""
         return self.rfile.read(length)
+
+    def _handle_count_tokens(self):
+        raw_body = self._read_body()
+        try:
+            body = json.loads(raw_body) if raw_body else {}
+        except json.JSONDecodeError:
+            return self._json(200, {"input_tokens": 0})
+        input_tokens = max(estimate_message_tokens(body.get("messages", [])), 1)
+        return self._json(200, {"input_tokens": input_tokens})
 
     def _handle_messages(self):
         raw_body = self._read_body()
@@ -355,17 +401,51 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="replace")
             sys.stderr.write(f"[smart-proxy] upstream {e.code}: {err_body[:300]}\n")
-            # Try to parse as JSON, otherwise wrap
+            # ALWAYS wrap the error in Anthropic format so Claude Code
+            # can parse it. Some upstreams return non-Anthropic JSON
+            # (e.g. an Express 404 with {status,error,response} fields)
+            # which causes Claude Code to crash with
+            # "Failed to parse JSON" and dump the raw body (including
+            # any embedded <system-reminder> tags) to the user.
+            err_type = "api_error"
+            if e.code in (401, 403):
+                err_type = "authentication_error"
+            elif e.code == 429:
+                err_type = "rate_limit_error"
+            elif 400 <= e.code < 500:
+                err_type = "invalid_request_error"
+            # Try to extract a useful message from the upstream body
+            msg = err_body[:500]
             try:
-                err_json = json.loads(err_body)
-                self.send_response(e.code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err_body)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(err_body.encode("utf-8"))
+                parsed = json.loads(err_body)
+                if isinstance(parsed, dict):
+                    # Common message fields
+                    for key in ("message", "error", "msg", "detail"):
+                        if key in parsed and isinstance(parsed[key], str):
+                            msg = parsed[key][:500]
+                            break
+                        if key in parsed and isinstance(parsed[key], dict):
+                            inner = parsed[key]
+                            if isinstance(inner, dict):
+                                for k2 in ("message", "detail"):
+                                    if k2 in inner and isinstance(inner[k2], str):
+                                        msg = inner[k2][:500]
+                                        break
             except json.JSONDecodeError:
-                self._error(e.code, err_body[:500], "api_error")
+                pass
+            wrapped = json.dumps({
+                "type": "error",
+                "error": {
+                    "type": err_type,
+                    "message": msg,
+                },
+            }).encode("utf-8")
+            self.send_response(e.code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(wrapped)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(wrapped)
             return
         except Exception as e:
             return self._error(502, f"Upstream connection failed: {e}", "api_error")
