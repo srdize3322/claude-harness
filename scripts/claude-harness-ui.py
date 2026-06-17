@@ -484,8 +484,46 @@ def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None
     return None
 
 
+# Context windows de Codex (ChatGPT backend) que difieren de los limites
+# del API de OpenAI reportados por models.dev. Datos confirmados por el
+# usuario en la UI de Codex y por tests directos al backend.
+#
+# Codex muestra "258k" para gpt-5.4 y gpt-5.5. Tests con multiples
+# mensajes muestran que el API real acepta >=400k, asi que el 258k
+# parece ser un soft limit (probablemente el display de la UI). Usamos
+# el valor que ve el user en Codex para que la TUI muestre lo mismo.
+#
+# Para override manual (env var o ~/.config/claude-harness/.env):
+#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_4=258000
+#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_5=258000
+#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_4_MINI=400000
+# etc.
+def _codex_context_override(model_id: str) -> int | None:
+    bare = model_id.split("/")[-1].lower().replace(".", "_").replace("-", "_")
+    env_key = f"CLAUDE_HARNESS_CODEX_CONTEXT_{bare.upper()}"
+    # Buscar en os.environ primero, luego en el .env
+    val = os.environ.get(env_key, "").strip()
+    if not val:
+        env_data = load_env_file(HARNESS_ENV_FILE)
+        val = env_data.get(env_key, "").strip()
+    if val:
+        try:
+            n = int(val)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    return None
+
+
 def get_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] | None,
                              provider_id: str | None = None) -> int:
+    # Codex: usar el valor que el user ve en la UI de Codex (no el del
+    # API de OpenAI en models.dev, que es mas alto).
+    if provider_id == "codex":
+        override = _codex_context_override(model_id)
+        if override is not None:
+            return override
     info = _lookup_model_info(model_id, catalog, provider_id)
     if info and isinstance(info, dict):
         ctx = info.get("limit", {}).get("context")
