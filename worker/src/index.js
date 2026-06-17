@@ -590,6 +590,15 @@ function transformStream(body, requestModel) {
 }
 
 async function handleMessages(request, env) {
+  // Routing: detect Codex mode from the Authorization header BEFORE
+  // checking OPENCODE_API_KEY. Codex mode uses its own auth (the
+  // access_token in the header), OpenCode Go mode uses the env secret.
+  const authHeader = request.headers.get("authorization") || "";
+  if (authHeader.startsWith("codex:")) {
+    const { handleCodexMessages } = await import("./codex-handler.js");
+    return handleCodexMessages(request, env);
+  }
+
   const apiKey = env.OPENCODE_API_KEY;
   if (!apiKey) {
     return new Response(
