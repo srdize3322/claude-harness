@@ -274,17 +274,17 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
         import shutil
         import subprocess as sp
         if not shutil.which("codex"):
-            return ProviderStatus(False, "falta codex CLI (brew install codex)")
+            return ProviderStatus(False, "codex CLI no instalado")
         result = sp.run(["codex", "login", "status"], capture_output=True, text=True)
         output = " ".join(p.strip() for p in [result.stdout, result.stderr] if p.strip()).lower()
         if "logged in" not in output:
-            return ProviderStatus(False, "falta login (Ctrl+L para device auth)")
+            return ProviderStatus(False, "login: device-auth")
         proxy_url = os.environ.get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
         if not proxy_url:
             proxy_url = load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
         if not proxy_url:
-            return ProviderStatus(False, "falta CLAUDE_HARNESS_CODEX_PROXY_URL (Ctrl+L para configurar)")
-        return ProviderStatus(True, "login ok")
+            return ProviderStatus(False, "falta proxy URL (Ctrl+L)")
+        return ProviderStatus(True, "ok")
     return ProviderStatus(False, "desconocido")
 
 
@@ -981,8 +981,10 @@ def draw_provider_list(stdscr, providers, statuses, index: int) -> None:
         attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
         safe_addstr(stdscr, y, 0, line, attr)
         line_w = len(line)
+        # Status right-aligned, but allow up to 35 chars (was 20).
         if line_w < w - 1:
-            safe_addstr(stdscr, y, w - 20, f"[{status_text}]", attr_pair(status_cp))
+            status_x = max(line_w + 2, w - len(status_text) - 4)
+            safe_addstr(stdscr, y, status_x, f"[{status_text}]", attr_pair(status_cp))
     draw_footer(stdscr, "[Enter] elegir  [Ctrl+L] login  [Ctrl+R] refresh  [Esc] salir")
 
 
@@ -1035,6 +1037,18 @@ def do_login_action(stdscr, provider, idx: int) -> None:
         if action == "codex-proxy-url":
             prompt_codex_proxy_url(stdscr)
             return
+    # For Codex, after device-auth finishes, if the proxy URL is not set,
+    # automatically prompt for it so the user doesn't have to re-enter the menu.
+    if provider.provider_id == "codex":
+        run_external_in_curses(stdscr, action())
+        status = get_provider_status(provider)
+        if status.logged_in:
+            proxy_url = os.environ.get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+            if not proxy_url:
+                proxy_url = load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+            if not proxy_url:
+                prompt_codex_proxy_url(stdscr)
+        return
     run_external_in_curses(stdscr, action())
 
 
