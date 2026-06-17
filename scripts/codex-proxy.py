@@ -847,8 +847,14 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
     # ---- Main handler ----
 
     def _handle_messages(self) -> None:
-        # 1. Parse Codex auth header
+        # 1. Parse Codex auth header. Claude Code may send either:
+        #   Authorization: codex:<token>:<account_id>
+        #   Authorization: Bearer codex:<token>:<account_id>
+        # (Claude Code prepends "Bearer " to ANTHROPIC_AUTH_TOKEN.)
         auth_header = self.headers.get("Authorization", "")
+        # Strip "Bearer " prefix if present
+        if auth_header.startswith("Bearer "):
+            auth_header = auth_header[len("Bearer "):]
         if not auth_header.startswith("codex:"):
             self._anthropic_error(
                 401,
