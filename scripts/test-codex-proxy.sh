@@ -6,6 +6,7 @@
 set -uo pipefail
 
 PROXY_SCRIPT="$(cd "$(dirname "$0")" && pwd)/codex-proxy.py"
+export CODEX_PROXY_SCRIPT="$PROXY_SCRIPT"
 PORT="${CODEX_PROXY_TEST_PORT:-8081}"
 HOST="127.0.0.1"
 LOG="/tmp/codex-proxy-test.log"
@@ -127,6 +128,17 @@ assert_eq "bad-format status" "401" "$STATUS"
 ERROR_TYPE="$(printf '%s' "$BODY" | python3 -c 'import sys,json;d=json.loads(sys.stdin.read());print(d.get("error",{}).get("type",""))' 2>/dev/null || echo "")"
 assert_eq "bad-format error type" "authentication_error" "$ERROR_TYPE"
 
+# 6b. POST /v1/messages?beta=true (query string should be ignored)
+echo "==> POST /v1/messages?beta=true (query string)"
+RESP="$(curl -s -w '\n%{http_code}' \
+  -X POST "http://$HOST:$PORT/v1/messages?beta=true" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: codex:no-colon' \
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"max_tokens":16}')"
+STATUS="$(printf '%s' "$RESP" | tail -n1)"
+# Should not be 404 (was the bug); should be 401 because malformed auth.
+assert_eq "beta query string status" "401" "$STATUS"
+
 # 7. POST /v1/messages with codex: prefix and fake token -> upstream rejects
 # (401 if upstream reachable, 502/500 if DNS/network fails, but never 200)
 echo "==> POST /v1/messages with fake codex: token"
@@ -168,10 +180,10 @@ assert_eq "unknown POST status" "404" "$STATUS"
 # 9. Inline unit tests on the conversion logic (no network needed).
 echo "==> Inline unit tests"
 UNIT_OUT="$(python3 - <<'PY' 2>&1
-import json, sys, importlib.util
+import json, os, sys, importlib.util
 spec = importlib.util.spec_from_file_location(
     "codex_proxy",
-    "/Users/santiago/claude-harness/scripts/codex-proxy.py",
+    os.environ.get("CODEX_PROXY_SCRIPT", os.path.expanduser("~/claude-harness/scripts/codex-proxy.py")),
 )
 codex_proxy = importlib.util.module_from_spec(spec)
 sys.modules["codex_proxy"] = codex_proxy
@@ -309,10 +321,10 @@ LEAK_RESP="$(curl -s -o /dev/null -w '%{http_code}\n' \
 # print a line containing a token by sending a special request that forces it.
 # Simpler: just call the redaction regex on a synthetic message and confirm.
 REDACT_OUT="$(python3 - <<'PY'
-import io, re, sys, importlib.util
+import io, os, re, sys, importlib.util
 spec = importlib.util.spec_from_file_location(
     "codex_proxy",
-    "/Users/santiago/claude-harness/scripts/codex-proxy.py",
+    os.environ.get("CODEX_PROXY_SCRIPT", os.path.expanduser("~/claude-harness/scripts/codex-proxy.py")),
 )
 m = importlib.util.module_from_spec(spec)
 sys.modules["codex_proxy"] = m

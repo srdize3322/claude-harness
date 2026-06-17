@@ -206,6 +206,58 @@ chmod 600 "$HOME/.codex/auth.json"
 OUTPUT=$("$WRAPPER" --dangerously-skip-permissions 2>&1) || true
 assert "dies on empty apikey" "OPENAI_API_KEY está vacío" "$OUTPUT"
 
+# --- Test 11: auto-start local proxy when proxy URL is localhost ---
+echo "=== Test 11: auto-start local proxy ==="
+create_auth_json "chatgpt" 3600
+
+# Buscar el script del proxy (debe existir en scripts/)
+PROXY_SCRIPT="$(cd "$(dirname "$0")/../../scripts" && pwd)/codex-proxy.py"
+if [ ! -f "$PROXY_SCRIPT" ]; then
+  echo "  SKIP: codex-proxy.py not found at $PROXY_SCRIPT"
+else
+  # Usar un puerto único para no chocar con otros tests
+  TEST_PROXY_PORT=18765
+  export CLAUDE_HARNESS_CODEX_PROXY_URL="http://127.0.0.1:$TEST_PROXY_PORT"
+
+  # Matar cualquier proxy previo en ese puerto
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:$TEST_PROXY_PORT 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  fi
+  # Esperar a que el puerto se libere
+  sleep 1
+
+  # El wrapper va a intentar arrancar el proxy y después correr la binaria claude
+  # (que no existe en TEST_HOME). Capturamos la salida y verificamos que el
+  # auto-arranque pasó.
+  OUTPUT=$("$WRAPPER" --dangerously-skip-permissions 2>&1) || true
+
+  # El output debe mencionar que se arrancó el proxy
+  if [[ "$OUTPUT" == *"Auto-arrancando proxy local"* ]]; then
+    echo "  PASS: wrapper attempted to auto-start the proxy"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: expected 'Auto-arrancando proxy local' in output"
+    echo "  Output: $OUTPUT"
+    fail=$((fail + 1))
+  fi
+
+  # El proxy debe estar corriendo ahora (verificamos con /health)
+  sleep 1
+  if curl -fsS --max-time 2 "http://127.0.0.1:$TEST_PROXY_PORT/health" >/dev/null 2>&1; then
+    echo "  PASS: proxy is running on port $TEST_PROXY_PORT"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL: proxy did not start (no /health response)"
+    fail=$((fail + 1))
+  fi
+
+  # Cleanup: matar el proxy
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:$TEST_PROXY_PORT 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  fi
+  unset CLAUDE_HARNESS_CODEX_PROXY_URL
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $pass passed, $fail failed ==="

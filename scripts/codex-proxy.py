@@ -777,14 +777,18 @@ class CodexProxyHandler(BaseHTTPRequestHandler):
         msg = re.sub(r"(Bearer |codex:)[^\s\"']+", r"\1***REDACTED***", msg)
         sys.stderr.write(f"[codex-proxy] {msg}\n")
 
+    def _route(self):
+        """Strip query string and return the path only."""
+        return self.path.split("?", 1)[0]
+
     def do_GET(self):
-        if self.path == "/health":
+        if self._route() == "/health":
             self._json_response(200, {"ok": True})
             return
         self._json_response(404, {"error": "not found"})
 
     def do_POST(self):
-        if self.path != "/v1/messages":
+        if self._route() != "/v1/messages":
             self._json_response(404, {"error": "not found"})
             return
         self._handle_messages()

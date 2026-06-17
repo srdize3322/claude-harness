@@ -198,6 +198,57 @@ case "${CLAUDE_HARNESS_CODEX_PROXY_URL}" in
   *) log "AVISO: CLAUDE_HARNESS_CODEX_PROXY_URL no es HTTPS (recomendado: https://...)" ;;
 esac
 
+# Si el proxy URL apunta a localhost, auto-arrancamos el proxy local si no está corriendo.
+# Esto evita que el user tenga que correr `python3 codex-proxy.py` en otra terminal.
+ensure_local_proxy_running() {
+  local proxy_url="$1"
+  # Extraer host:port del URL
+  local hostport
+  hostport=$(echo "$proxy_url" | sed -E 's|^https?://||; s|/.*$||')
+  local host="${hostport%:*}"
+  local port="${hostport##*:}"
+  # Solo auto-arrancar si es localhost
+  case "$host" in
+    localhost|127.0.0.1|::1) ;;
+    *) return 0 ;;
+  esac
+  # Verificar si ya está corriendo (health check rápido)
+  if curl -fsS --max-time 2 "$proxy_url/health" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Buscar el script del proxy
+  local script
+  for candidate in \
+    "$HOME/claude-harness/scripts/codex-proxy.py" \
+    "$HOME/.local/share/claude-harness/scripts/codex-proxy.py" \
+    "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/codex-proxy.py"; do
+    [ -f "$candidate" ] && script="$candidate" && break
+  done
+  [ -n "${script:-}" ] || die "No se encontró codex-proxy.py. Instala claude-harness o corré: python3 codex-proxy.py --port $port"
+  log "Auto-arrancando proxy local en $host:$port..."
+  # Arrancar en background, redirigir output a log
+  local logfile="$HOME/.config/claude-harness/codex-proxy.log"
+  nohup python3 "$script" --host "$host" --port "$port" > "$logfile" 2>&1 &
+  local pid=$!
+  # Esperar a que el health check responda (max 10s)
+  local i
+  for i in {1..20}; do
+    if curl -fsS --max-time 1 "$proxy_url/health" >/dev/null 2>&1; then
+      log "Proxy arrancado (pid=$pid)"
+      return 0
+    fi
+    # Verificar que el proceso no haya muerto
+    if ! kill -0 "$pid" 2>/dev/null; then
+      log "ERROR: el proxy murió al arrancar. Ver $logfile"
+      die "Fallo al arrancar el proxy local"
+    fi
+    sleep 0.5
+  done
+  die "Timeout esperando que el proxy responda en $proxy_url (ver $logfile)"
+}
+
+ensure_local_proxy_running "$CLAUDE_HARNESS_CODEX_PROXY_URL"
+
 export ANTHROPIC_BASE_URL="$CLAUDE_HARNESS_CODEX_PROXY_URL"
 export CLAUDE_CODE_DISABLE_1M_CONTEXT=1
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
