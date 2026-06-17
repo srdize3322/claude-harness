@@ -190,6 +190,7 @@ download "scripts/codex-proxy.py"        "$PREFIX/scripts/codex-proxy.py"       
 download "scripts/smart-proxy.py"        "$PREFIX/scripts/smart-proxy.py"        true
 download "scripts/test-codex-proxy.sh"   "$PREFIX/scripts/test-codex-proxy.sh"   true
 download "scripts/test-smart-proxy.sh"  "$PREFIX/scripts/test-smart-proxy.sh"  true
+download "scripts/test-models-live.sh"   "$PREFIX/scripts/test-models-live.sh"   true
 download "docs/README.md"                "$PREFIX/docs/README.md"                false
 echo
 
