@@ -110,7 +110,7 @@ download() {
     local api_url="$RAW_URL/$src?ref=$REPO_BRANCH"
     local b64
     b64=$(curl -fsSL --connect-timeout 10 "$api_url" 2>/dev/null \
-      | python3 -c "import json, sys; print(json.load(sys.stdin).get('content', ''))" 2>/dev/null)
+      | python3 -c "import json, sys; print(json.load(sys.stdin).get('content', ''))" 2>/dev/null) || true
     if [ -n "$b64" ]; then
       echo "$b64" | base64 -d > "$dst" 2>/dev/null
       if [ $? -eq 0 ]; then
@@ -148,6 +148,7 @@ download "scripts/claude-openrouter"     "$PREFIX/scripts/claude-openrouter"    
 download "scripts/claude-opencode-go"    "$PREFIX/scripts/claude-opencode-go"    true
 download "scripts/claude-native"         "$PREFIX/scripts/claude-native"         true
 download "scripts/claude-codex"          "$PREFIX/scripts/claude-codex"          true
+download "scripts/codex-proxy.py"        "$PREFIX/scripts/codex-proxy.py"        true
 download "docs/README.md"                "$PREFIX/docs/README.md"                false
 echo
 
