@@ -153,6 +153,6 @@ dim "  2. Ejecutá: claude-harness"
 dim "  3. Primera vez: elegí un provider y seguí las instrucciones de login"
 echo
 printf "    ${BOLD}Documentación:${RESET}\n"
-dim "  https://github.com/anomalyco/claude-harness#readme"
+dim "  https://github.com/srdize3322/claude-harness#readme"
 dim "  cat $PREFIX/docs/README.md"
 echo

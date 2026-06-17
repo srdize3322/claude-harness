@@ -58,15 +58,15 @@ Y vas a entrar a la TUI.
 # En otro directorio
 CLAUDE_HARNESS_PREFIX=$HOME/mis-scripts \
 CLAUDE_HARNESS_BIN=$HOME/mis-bin \
-  curl -fsSL https://raw.githubusercontent.com/anomalyco/claude-harness/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/srdize3322/claude-harness/main/install.sh | bash
 
 # Sin symlinks (manual PATH)
 CLAUDE_HARNESS_NO_SYMLINK=1 \
-  curl -fsSL https://raw.githubusercontent.com/anomalyco/claude-harness/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/srdize3322/claude-harness/main/install.sh | bash
 
 # Desde un fork
 CLAUDE_HARNESS_REPO_URL=https://github.com/mi-user/claude-harness \
-  curl -fsSL https://raw.githubusercontent.com/anomalyco/claude-harness/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/srdize3322/claude-harness/main/install.sh | bash
 ```
 
 ### Requisitos
@@ -193,7 +193,7 @@ claude-harness
 # → OpenCode Go → minimax-m3
 ```
 
-Pasa por un [Cloudflare Worker](https://github.com/anomalyco/claude-harness) que traduce
+Pasa por un [Cloudflare Worker](https://github.com/srdize3322/claude-harness) que traduce
 Anthropic ↔ OpenAI. Útil para providers que solo exponen OpenAI-compatible.
 
 ### MiniMax
@@ -316,7 +316,7 @@ brew install --cask claude-code
 
 ```bash
 # Clonar
-git clone https://github.com/anomalyco/claude-harness.git
+git clone https://github.com/srdize3322/claude-harness.git
 cd claude-harness
 
 # Test el install
