@@ -195,29 +195,28 @@ def detect_backend(model: str) -> tuple[str, str]:
     }
     for prefix, backend in prefix_map.items():
         if ml.startswith(prefix):
-            return backend, m[len(prefix):]
+            clean_m = m[len(prefix):]
+            clean_m = re.sub(r"\[[12]m\]$", "", clean_m, flags=re.IGNORECASE).strip()
+            return backend, clean_m
 
-    # Strip [1m] suffix for detection (used by Claude Code for 1M context)
-    bare = re.sub(r"\[(1|2)m\]$", "", ml).strip()
+    # Strip [1m] suffix for detection and upstream passing
+    bare = re.sub(r"\[[12]m\]$", "", m, flags=re.IGNORECASE).strip()
+    bare_lower = bare.lower()
 
     # Heuristic detection
-    if bare.startswith("claude-") or bare.startswith("claude_"):
-        return "anthropic", m
-    if bare.startswith("gpt-") or bare.startswith("o1") or bare.startswith("o3") \
-            or bare.startswith("o4") or bare.startswith("codex-"):
-        return "codex", m
-    # MiniMax: case-sensitive! The MiniMax API uses PascalCase
-    # (MiniMax-M3, MiniMax-M2.7, etc.). OpenCode Go uses lowercase
-    # (minimax-m3) as its default model. So we only route to MiniMax
-    # if the name starts with a capital 'M' (i.e. looks like a MiniMax
-    # API model name, not an OpenCode Go model name).
-    if m.startswith("MiniMax-") or m.startswith("MiniMax/") or m == "MiniMax-M3":
-        return "minimax", m
-    if "/" in m and m.split("/")[0] == "minimax":
-        return "minimax", m
+    if bare_lower.startswith("claude-") or bare_lower.startswith("claude_"):
+        return "anthropic", bare
+    if bare_lower.startswith("gpt-") or bare_lower.startswith("o1") or bare_lower.startswith("o3") \
+            or bare_lower.startswith("o4") or bare_lower.startswith("codex-"):
+        return "codex", bare
+    # MiniMax: case-sensitive!
+    if bare.startswith("MiniMax-") or bare.startswith("MiniMax/") or bare == "MiniMax-M3":
+        return "minimax", bare
+    if "/" in bare and bare.split("/")[0] == "minimax":
+        return "minimax", bare
 
     # Fallback to main backend (set by the wrapper)
-    return "main", m
+    return "main", bare
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +375,9 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         if backend == "main":
             backend = main_backend or "anthropic"
 
-        # Pass through request headers (sans Host/Content-Length)
+        # Pass through request headers (sans Host/Content-Length/Accept-Encoding)
         in_headers = {k: v for k, v in self.headers.items()
-                      if k.lower() not in ("host", "content-length", "connection")}
+                      if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
 
         try:
             if backend == "anthropic":

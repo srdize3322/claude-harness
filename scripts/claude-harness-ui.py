@@ -90,6 +90,7 @@ class ModelItem:
     label: str
     reasoning: bool = False
     reasoning_options: list[dict] | None = None
+    context: int | None = None
 
 
 @dataclass
@@ -240,6 +241,7 @@ def get_multi_provider_main_models(provider_id: str, force_refresh: bool = False
             model.label,
             model.reasoning,
             model.reasoning_options,
+            model.context,
         ))
     return out
 
@@ -531,13 +533,14 @@ def fetch_codex_models() -> list[ModelItem]:
         if not slug:
             continue
         label = str(entry.get("display_name", slug)).strip() or slug
-        items.append(ModelItem(slug, label))
+        ctx = entry.get("context_window")
+        items.append(ModelItem(slug, label, context=ctx))
     if len(items) == 1:
         items.extend([
-            ModelItem("gpt-5.5", "GPT-5.5"),
-            ModelItem("gpt-5.4", "GPT-5.4"),
-            ModelItem("gpt-5.4-mini", "GPT-5.4-Mini"),
-            ModelItem("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
+            ModelItem("gpt-5.5", "GPT-5.5", context=258000),
+            ModelItem("gpt-5.4", "GPT-5.4", context=258000),
+            ModelItem("gpt-5.4-mini", "GPT-5.4-Mini", context=400000),
+            ModelItem("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", context=258000),
         ])
     return items
 
@@ -567,7 +570,8 @@ def fetch_openrouter_models() -> list[ModelItem]:
         if not slug:
             continue
         label = str(entry.get("name", slug)).strip() or slug
-        items.append(ModelItem(slug, label))
+        ctx = entry.get("context_length")
+        items.append(ModelItem(slug, label, context=ctx))
     return items
 
 
@@ -635,6 +639,27 @@ def fetch_models_dev_catalog(force: bool = False) -> dict[str, dict[str, dict]] 
             pass
 
     return None
+
+
+def fetch_catalog_models(provider_key: str, default_fallback: list[ModelItem]) -> list[ModelItem]:
+    catalog = fetch_models_dev_catalog(force=False)
+    if not catalog or provider_key not in catalog:
+        return default_fallback
+    
+    models_dict = catalog[provider_key].get("models", {})
+    if not models_dict:
+        return default_fallback
+    
+    items = [ModelItem("default", "Default")]
+    for slug, attrs in models_dict.items():
+        if not isinstance(attrs, dict):
+            continue
+        label = str(attrs.get("name", slug)).strip() or slug
+        reasoning = bool(attrs.get("reasoning", False))
+        reasoning_opts = attrs.get("reasoning_options", None)
+        ctx = attrs.get("limit", {}).get("context")
+        items.append(ModelItem(slug, label, reasoning, reasoning_opts, context=ctx))
+    return items
 
 
 def _extract_caps(data: dict) -> dict[str, dict[str, dict]]:
@@ -770,46 +795,29 @@ def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None
     return None
 
 
-# Context windows de Codex (ChatGPT backend) que difieren de los limites
-# del API de OpenAI reportados por models.dev. Datos confirmados por el
-# usuario en la UI de Codex y por tests directos al backend.
-#
-# Codex muestra "258k" para gpt-5.4 y gpt-5.5. Tests con multiples
-# mensajes muestran que el API real acepta >=400k, asi que el 258k
-# parece ser un soft limit (probablemente el display de la UI). Usamos
-# el valor que ve el user en Codex para que la TUI muestre lo mismo.
-#
-# Para override manual (env var o ~/.config/claude-harness/.env):
-#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_4=258000
-#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_5=258000
-#   CLAUDE_HARNESS_CODEX_CONTEXT_GPT_5_4_MINI=400000
-# etc.
-def _codex_context_override(model_id: str) -> int | None:
-    bare = model_id.split("/")[-1].lower().replace(".", "_").replace("-", "_")
-    env_key = f"CLAUDE_HARNESS_CODEX_CONTEXT_{bare.upper()}"
-    # Buscar en os.environ primero, luego en el .env
-    val = os.environ.get(env_key, "").strip()
-    if not val:
-        env_data = load_env_file(HARNESS_ENV_FILE)
-        val = env_data.get(env_key, "").strip()
-    if val:
-        try:
-            n = int(val)
-            if n > 0:
-                return n
-        except ValueError:
-            pass
-    return None
-
-
 def get_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] | None,
                              provider_id: str | None = None) -> int:
-    # Codex: usar el valor que el user ve en la UI de Codex (no el del
-    # API de OpenAI en models.dev, que es mas alto).
-    if provider_id == "codex":
-        override = _codex_context_override(model_id)
-        if override is not None:
-            return override
+    # Primero intentar sacar el limite exacto desde el proveedor (por ejemplo
+    # desde fetch_codex_models o fetch_openrouter_models).
+    cache = load_model_cache()
+    if isinstance(cache, dict) and provider_id:
+        provider_cache = cache.get(provider_id, {})
+        if isinstance(provider_cache, dict):
+            for m in provider_cache.get("models", []):
+                if isinstance(m, dict) and m.get("model_id") == model_id:
+                    ctx = m.get("context")
+                    if isinstance(ctx, (int, float)) and ctx > 0:
+                        return int(ctx)
+        # Buscar en multi-provider
+        if provider_id == "multi":
+            multi_cache = cache.get("multi", {})
+            if isinstance(multi_cache, dict):
+                for m in multi_cache.get("models", []):
+                    if isinstance(m, dict) and m.get("model_id") == model_id:
+                        ctx = m.get("context")
+                        if isinstance(ctx, (int, float)) and ctx > 0:
+                            return int(ctx)
+
     info = _lookup_model_info(model_id, catalog, provider_id)
     if info and isinstance(info, dict):
         ctx = info.get("limit", {}).get("context")
@@ -1024,7 +1032,8 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
     if not force_refresh and cached_models and time.time() - cached_at < MODEL_CACHE_TTL_SECONDS:
         return [ModelItem(i["model_id"], i["label"],
                           i.get("reasoning", False),
-                          i.get("reasoning_options"))
+                          i.get("reasoning_options"),
+                          i.get("context"))
                 for i in cached_models if isinstance(i, dict)]
     if provider.provider_id == "claude":
         models = fetch_claude_models()
@@ -1033,9 +1042,9 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
     elif provider.provider_id == "openrouter":
         models = fetch_openrouter_models()
     elif provider.provider_id == "minimax":
-        models = MINIMAX_MODELS
+        models = fetch_catalog_models("minimax", MINIMAX_MODELS)
     elif provider.provider_id == "opencode-go":
-        models = OPENCODE_GO_MODELS
+        models = fetch_catalog_models("opencode-go", OPENCODE_GO_MODELS)
     elif provider.provider_id == "multi":
         # Multi-provider: aggregate ALL models from ALL backends so the
         # user can pick any model as the main. Models are prefixed with
@@ -1091,7 +1100,8 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
     cache[cache_key] = {
         "fetched_at": time.time(),
         "models": [{"model_id": m.model_id, "label": m.label,
-                    "reasoning": m.reasoning, "reasoning_options": m.reasoning_options}
+                    "reasoning": m.reasoning, "reasoning_options": m.reasoning_options,
+                    "context": m.context}
                    for m in models],
     }
     save_model_cache(cache)

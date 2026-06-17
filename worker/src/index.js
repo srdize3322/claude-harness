@@ -78,7 +78,7 @@ async function anthropicToOpenAI(body) {
   }
 
   const openaiBody = {
-    model: body.model || DEFAULT_MODEL,
+    model: (body.model || DEFAULT_MODEL).replace(/\[[12]m\]$/i, "").trim(),
     messages,
     stream: body.stream || false,
   };
