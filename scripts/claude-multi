@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# claude-multi: wrapper for multi-provider Claude Code sessions.
+#
+# Routes /v1/messages requests through smart-proxy.py, which dispatches
+# each request to the right backend based on the model name. Lets a
+# single Claude Code process use models from different providers
+# (e.g. main = Anthropic Opus, sonnet slot = Codex gpt-5.4, haiku
+# slot = MiniMax-M3).
+#
+# Required: smart-proxy.py on PATH or in same dir.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SMART_PROXY="${SMART_PROXY:-$SCRIPT_DIR/smart-proxy.py}"
+CODEX_PROXY="${CODEX_PROXY:-$SCRIPT_DIR/codex-proxy.py}"
+
+SMART_HOST="${CLAUDE_HARNESS_SMART_PROXY_HOST:-127.0.0.1}"
+SMART_PORT="${CLAUDE_HARNESS_SMART_PROXY_PORT:-8081}"
+CODEX_PORT="${CLAUDE_HARNESS_CODEX_PROXY_PORT:-8080}"
+
+log() { printf "[claude-multi] %s\n" "$*" >&2; }
+die() { printf "[claude-multi] ERROR: %s\n" "$*" >&2; exit 1; }
+
+# Sanity checks
+[ -f "$SMART_PROXY" ] || die "smart-proxy.py no encontrado en $SMART_PROXY"
+[ -f "$CODEX_PROXY" ] || die "codex-proxy.py no encontrado en $CODEX_PROXY"
+command -v python3 >/dev/null || die "python3 no instalado"
+command -v claude >/dev/null || die "claude (Claude Code) no instalado"
+
+# Auto-start codex-proxy if any slot needs Codex
+need_codex_proxy() {
+  local m
+  for var in CLAUDE_HARNESS_SLOT_OPUS CLAUDE_HARNESS_SLOT_SONNET CLAUDE_HARNESS_SLOT_HAIKU; do
+    m="${!var:-}"
+    case "$m" in
+      gpt-*|codex-*|codex/*|o1*|o3*|o4*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Auto-start smart-proxy
+ensure_smart_proxy() {
+  if curl -sS --connect-timeout 1 "http://${SMART_HOST}:${SMART_PORT}/health" >/dev/null 2>&1; then
+    log "smart-proxy ya corriendo en ${SMART_HOST}:${SMART_PORT}"
+    return 0
+  fi
+  log "Auto-arrancando smart-proxy en ${SMART_HOST}:${SMART_PORT}..."
+  nohup python3 "$SMART_PROXY" --host "$SMART_HOST" --port "$SMART_PORT" \
+    >"${CLAUDE_HARNESS_SMART_PROXY_LOG:-/tmp/claude-harness-smart-proxy.log}" 2>&1 &
+  local pid=$!
+  # Wait up to 10s for /health
+  local i
+  for i in $(seq 1 20); do
+    if curl -sS --connect-timeout 1 "http://${SMART_HOST}:${SMART_PORT}/health" >/dev/null 2>&1; then
+      log "smart-proxy arrancado (pid=$pid)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  die "smart-proxy no respondio en ${SMART_HOST}:${SMART_PORT}"
+}
+
+# Auto-start codex-proxy if needed
+ensure_codex_proxy() {
+  if curl -sS --connect-timeout 1 "http://127.0.0.1:${CODEX_PORT}/health" >/dev/null 2>&1; then
+    log "codex-proxy ya corriendo en 127.0.0.1:${CODEX_PORT}"
+    return 0
+  fi
+  log "Auto-arrancando codex-proxy en 127.0.0.1:${CODEX_PORT}..."
+  nohup python3 "$CODEX_PROXY" --port "$CODEX_PORT" \
+    >"${CLAUDE_HARNESS_CODEX_PROXY_LOG:-/tmp/claude-harness-codex-proxy.log}" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 20); do
+    if curl -sS --connect-timeout 1 "http://127.0.0.1:${CODEX_PORT}/health" >/dev/null 2>&1; then
+      log "codex-proxy arrancado (pid=$pid)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  die "codex-proxy no respondio en 127.0.0.1:${CODEX_PORT}"
+}
+
+ensure_codex_proxy_if_needed() {
+  if need_codex_proxy; then
+    ensure_codex_proxy
+  fi
+}
+
+# Read auth files to detect which providers are usable
+auth_ok() {
+  local prov="$1"
+  case "$prov" in
+    anthropic)
+      [ -f "$HOME/.claude/.credentials.json" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || \
+        [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || return 1
+      ;;
+    codex) [ -f "$HOME/.codex/auth.json" ] || return 1 ;;
+    minimax|openrouter|opencode-go) [ -f "$HOME/.local/share/opencode/auth.json" ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# Detect which providers are needed (main + slots) and warn if any missing
+main_model="${CLAUDE_HARNESS_SLOT_MAIN:-}"
+[ -z "$main_model" ] && main_model="default"
+
+log "Configuracion multi-provider:"
+log "  main     = $main_model"
+log "  opus     = ${CLAUDE_HARNESS_SLOT_OPUS:-(= main)}"
+log "  sonnet   = ${CLAUDE_HARNESS_SLOT_SONNET:-(= main)}"
+log "  haiku    = ${CLAUDE_HARNESS_SLOT_HAIKU:-(= main)}"
+
+# Auto-start proxies
+ensure_smart_proxy
+ensure_codex_proxy_if_needed
+
+# Configure environment for Claude Code
+export ANTHROPIC_BASE_URL="http://${SMART_HOST}:${SMART_PORT}"
+# ANTHROPIC_AUTH_TOKEN is required by Claude Code but the smart proxy
+# ignores it (uses its own per-backend auth).
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-smart-proxy-passthrough}"
+unset ANTHROPIC_API_KEY
+
+# Pass the main model
+if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
+  export ANTHROPIC_MODEL="$main_model"
+fi
+
+# Set per-slot models (the smart proxy routes these to the right backend)
+if [ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ]; then
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDE_HARNESS_SLOT_OPUS}"
+fi
+if [ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ]; then
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDE_HARNESS_SLOT_SONNET}"
+fi
+if [ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ]; then
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDE_HARNESS_SLOT_HAIKU}"
+fi
+
+# Inform smart-proxy which backend to use for unprefixed models
+if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
+  case "$main_model" in
+    claude-*|anthropic/*) export CLAUDE_HARNESS_MAIN_BACKEND="anthropic" ;;
+    gpt-*|codex-*|codex/*) export CLAUDE_HARNESS_MAIN_BACKEND="codex" ;;
+    MiniMax-*|minimax/*) export CLAUDE_HARNESS_MAIN_BACKEND="minimax" ;;
+    openrouter/*) export CLAUDE_HARNESS_MAIN_BACKEND="openrouter" ;;
+    opencode-go/*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
+  esac
+fi
+
+# Tell the Codex proxy (if running) the upstream URL
+export CLAUDE_HARNESS_CODEX_PROXY_URL="http://127.0.0.1:${CODEX_PORT}"
+
+# Reduce non-essential traffic
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-3000000}"
+
+log "Lanzando Claude Code..."
+exec claude "$@"

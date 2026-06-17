@@ -71,6 +71,7 @@ CLAUDE_OPENROUTER_LAUNCHER = str(ROOT / "claude-openrouter")
 CLAUDE_OPENCODE_GO_LAUNCHER = str(ROOT / "claude-opencode-go")
 CLAUDE_MINIMAX_LAUNCHER = str(ROOT / "claude-minimax")
 CLAUDE_CODEX_LAUNCHER = str(ROOT / "claude-codex")
+CLAUDE_MULTI_LAUNCHER = str(ROOT / "claude-multi")
 
 ESC = ""
 BOLD = ""
@@ -117,11 +118,23 @@ class PermissionOption:
 
 @dataclass
 class AgentSlots:
+    """Per-agent model slots. Each slot stores the model id; the
+    provider is inferred from the model name + prefix (e.g. ``gpt-``
+    -> Codex, ``MiniMax-`` -> MiniMax) and from any ``provider/``
+    prefix in the id.
+
+    If a slot's model comes from a different provider than the main
+    session, the TUI will route the launch through the multi-provider
+    smart proxy (claude-multi) so a single Claude Code process can use
+    models from different backends.
+    """
     opus: str | None = None
     sonnet: str | None = None
     haiku: str | None = None
 
 
+# Models that Claude Code can recognize via [1m] suffix. Keep in sync
+# with the model_id_for_claude_code logic.
 def get_provider_models_for_slots(provider_id: str) -> list[ModelItem]:
     if provider_id == "minimax":
         return MINIMAX_MODELS
@@ -131,6 +144,85 @@ def get_provider_models_for_slots(provider_id: str) -> list[ModelItem]:
         if p.provider_id == provider_id:
             return fetch_models_for_provider(p, force_refresh=False)
     return []
+
+
+# All provider ids we know about (used for the "Otro provider" sub-picker
+# when configuring agent slots).
+ALL_PROVIDER_IDS: tuple[str, ...] = (
+    "claude", "codex", "minimax", "openrouter", "opencode-go",
+)
+ALL_PROVIDER_LABELS: dict[str, str] = {
+    "claude": "Anthropic",
+    "codex": "Codex",
+    "minimax": "MiniMax",
+    "openrouter": "OpenRouter",
+    "opencode-go": "OpenCode Go",
+}
+
+
+def get_all_models_all_providers() -> list[tuple[str, str, str]]:
+    """Return (model_id, label, provider_id) for every model from every
+    provider. Used by the agent-slots picker so the user can mix and
+    match models from different providers.
+    """
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for prov_id in ALL_PROVIDER_IDS:
+        try:
+            models = get_provider_models_for_slots(prov_id)
+        except Exception:
+            models = []
+        for m in models:
+            # Prefix model_id with provider/ to disambiguate in the picker.
+            # The smart proxy strips the prefix when routing.
+            prefixed = f"{prov_id}/{m.model_id}"
+            if prefixed in seen:
+                continue
+            seen.add(prefixed)
+            label = f"[{ALL_PROVIDER_LABELS.get(prov_id, prov_id)}] {m.label}"
+            out.append((prefixed, label, prov_id))
+    return out
+
+
+def infer_provider_for_model(model_id: str | None) -> str | None:
+    """Best-effort provider inference for a model id, used to decide
+    whether the multi-provider launcher is needed.
+
+    Returns one of ALL_PROVIDER_IDS or None.
+    """
+    if not model_id:
+        return None
+    m = model_id.lower()
+    # Explicit prefix wins
+    for prov_id in ALL_PROVIDER_IDS:
+        if m.startswith(prov_id + "/"):
+            return prov_id
+    # Anthropic native
+    if m.startswith("claude-") or m.startswith("claude_"):
+        return "claude"
+    # Codex (also: o1/o3/o4 series)
+    if (m.startswith("gpt-") or m.startswith("o1") or m.startswith("o3")
+            or m.startswith("o4") or m.startswith("codex-")):
+        return "codex"
+    # MiniMax
+    if m.startswith("minimax-") or m.startswith("minimax/") or m == "minimax-m3":
+        return "minimax"
+    # OpenRouter and OpenCode Go are typically accessed via prefixed
+    # paths, but we accept bare names if they look like OR/OCG models.
+    return None
+
+
+def is_multi_provider_needed(main_provider: str | None, slots: AgentSlots) -> bool:
+    """True if any slot uses a different provider than the main one."""
+    if main_provider is None:
+        return False
+    for slot_value in (slots.opus, slots.sonnet, slots.haiku):
+        if not slot_value:
+            continue
+        prov = infer_provider_for_model(slot_value)
+        if prov and prov != main_provider:
+            return True
+    return False
 
 
 PROVIDERS = [
@@ -144,6 +236,10 @@ PROVIDERS = [
                        default_model_env="CLAUDE_HARNESS_MINIMAX_MODEL"),
     ProviderDefinition("codex", "Codex", CLAUDE_CODEX_LAUNCHER, "codex",
                        default_model_env="CLAUDE_HARNESS_CODEX_MODEL"),
+    # Multi-provider: routes each request to the right backend based
+    # on model name. Auto-selected when slots use different providers.
+    ProviderDefinition("multi", "Multi-provider (smart proxy)", CLAUDE_MULTI_LAUNCHER,
+                       "claude", default_model_env="CLAUDE_HARNESS_MULTI_MODEL"),
 ]
 
 PERMISSION_OPTIONS: dict[str, list[PermissionOption]] = {
@@ -1583,19 +1679,30 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots) -
         return True
 
 
+def _flatten_all_models_for_slots() -> list[tuple[str, str, str]]:
+    """Flat list of (model_id_with_prefix, label, provider_id) for every
+    model from every provider, used by the slot picker to let the user
+    pick any model from any provider.
+    """
+    return get_all_models_all_providers()
+
+
 def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
     draw_header(stdscr, f"Subagentes: {provider.label}", f"main = {main_model.label}")
-    safe_addstr(stdscr, 3, 0, "  Enter: confirmar todo  Esc: usar main para todos  flechas: navegar", attr_pair(CP_DIM))
+    safe_addstr(stdscr, 3, 0,
+                "  Enter: confirmar todo  Esc: usar main para todos  flechas: navegar", attr_pair(CP_DIM))
     safe_addstr(stdscr, 4, 0, "")
 
+    # Slot headers
     section1_row = 5
     if stage == "sonnet":
         safe_addstr(stdscr, section1_row, 0, "  > slot sonnet:", attr_pair(CP_TITLE) | attr_bold())
     else:
         safe_addstr(stdscr, section1_row, 0, "    slot sonnet:", attr_pair(CP_DIM))
-    sonnet_str = sonnet if sonnet else "= main (default)"
+    sonnet_prov = infer_provider_for_model(sonnet) if sonnet else None
+    sonnet_str = f"{sonnet} [{ALL_PROVIDER_LABELS.get(sonnet_prov, '?')}]" if sonnet else "= main (default)"
     if sonnet:
         safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}", attr_pair(CP_HINT))
     else:
@@ -1606,7 +1713,8 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> Non
         safe_addstr(stdscr, section2_row, 0, "  > slot haiku:", attr_pair(CP_TITLE) | attr_bold())
     else:
         safe_addstr(stdscr, section2_row, 0, "    slot haiku:", attr_pair(CP_DIM))
-    haiku_str = haiku if haiku else "= main (default)"
+    haiku_prov = infer_provider_for_model(haiku) if haiku else None
+    haiku_str = f"{haiku} [{ALL_PROVIDER_LABELS.get(haiku_prov, '?')}]" if haiku else "= main (default)"
     if haiku:
         safe_addstr(stdscr, section2_row, 16, f"  {haiku_str}", attr_pair(CP_HINT))
     else:
@@ -1618,31 +1726,54 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage) -> Non
     else:
         current = haiku
 
-    safe_addstr(stdscr, list_start - 1, 0, f"  Modelos disponibles de {provider.label}:", attr_pair(CP_HINT))
-    items = get_provider_models_for_slots(provider.provider_id)
-    if not items:
-        safe_addstr(stdscr, list_start, 0, "  (no hay modelos cargados; usa Tab para volver)", attr_pair(CP_DIM))
-        return
+    safe_addstr(stdscr, list_start - 1, 0,
+                "  Modelos disponibles (todos los providers):", attr_pair(CP_HINT))
+
+    # Row 1: "= main" option
     if current is None:
-        marker_main = ">"
+        marker = ">"
+        attr = attr_pair(CP_SELECT) | attr_bold()
     else:
-        marker_main = " "
-    safe_addstr(stdscr, list_start, 0, f"  {marker_main} {main_model.model_id}  (default = main)", attr_pair(CP_SELECT) | attr_bold() if current is None else 0)
-    for idx, m in enumerate(items, 1):
-        row = list_start + idx
+        marker = " "
+        attr = curses.A_NORMAL
+    safe_addstr(stdscr, list_start, 0,
+                f"  {marker} = main  (default = {main_model.label})", attr)
+
+    # Then list all models from all providers, grouped by provider
+    all_models = _flatten_all_models_for_slots()
+    row = list_start + 1
+    current_prov = None
+    for model_id, label, prov_id in all_models:
+        if prov_id != current_prov:
+            # Section header
+            if row < h - 2:
+                safe_addstr(stdscr, row, 0,
+                            f"  -- {ALL_PROVIDER_LABELS.get(prov_id, prov_id)} --",
+                            attr_pair(CP_DIM))
+                row += 1
+            current_prov = prov_id
         if row >= h - 2:
             break
-        is_sel = (current is not None and current == m.model_id)
+        is_sel = (current is not None and current == model_id)
         marker = ">" if is_sel else " "
         attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
-        if m.model_id == main_model.model_id:
-            safe_addstr(stdscr, row, 0, f"  {marker} {m.model_id}  (main)", attr)
-            continue
-        safe_addstr(stdscr, row, 0, f"  {marker} {m.model_id}", attr)
+        # Show short label
+        short = label.replace(f"[{ALL_PROVIDER_LABELS.get(prov_id, prov_id)}] ", "")
+        safe_addstr(stdscr, row, 0, f"  {marker} {short}  ({prov_id})", attr)
+        row += 1
+
+    if not all_models:
+        safe_addstr(stdscr, list_start + 1, 0,
+                    "  (no hay modelos cargados)", attr_pair(CP_DIM))
+
     draw_footer(stdscr, "Enter: elegir  Esc: volver al slot anterior")
 
 
 def pick_agent_slots(stdscr, provider, main_model) -> AgentSlots:
+    """Pick sonnet and haiku slots. Each slot can be any model from any
+    provider. If a slot uses a different provider than the main, the
+    caller should use the multi-provider launcher.
+    """
     slots = AgentSlots()
     sonnet: str | None = None
     haiku: str | None = None
@@ -1654,60 +1785,43 @@ def pick_agent_slots(stdscr, provider, main_model) -> AgentSlots:
         if key == -1:
             continue
         if key in (curses.KEY_ENTER, 10, 13):
+            # Confirm the current slot's selection and move on
             if stage == "sonnet":
                 stage = "haiku"
                 continue
             return AgentSlots(sonnet=sonnet, haiku=haiku)
-        if key == 27:
+        if key == 27:  # ESC
             if stage == "haiku":
                 stage = "sonnet"
                 continue
             return AgentSlots()
+        if key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+            return AgentSlots()
+        # Get the flat list of (model_id, label, prov_id)
+        all_models = _flatten_all_models_for_slots()
+        # Build the navigable list: [None (=main)] + all model_ids
+        nav_ids: list[str | None] = [None] + [m[0] for m in all_models]
+        current = sonnet if stage == "sonnet" else haiku
+        try:
+            cur_idx = nav_ids.index(current)
+        except ValueError:
+            cur_idx = 0
         if key == curses.KEY_DOWN:
-            items = get_provider_models_for_slots(provider.provider_id)
-            if not items:
-                continue
-            current = sonnet if stage == "sonnet" else haiku
-            if current is None:
-                if items:
-                    first = items[0]
-                    if stage == "sonnet":
-                        sonnet = first.model_id
-                    else:
-                        haiku = first.model_id
-                continue
-            idx = next((i for i, m in enumerate(items) if m.model_id == current), -1)
-            if idx < 0:
-                continue
-            if idx + 1 < len(items):
-                chosen = items[idx + 1].model_id
+            if cur_idx + 1 < len(nav_ids):
+                chosen = nav_ids[cur_idx + 1]
                 if stage == "sonnet":
                     sonnet = chosen
                 else:
                     haiku = chosen
             continue
         if key == curses.KEY_UP:
-            items = get_provider_models_for_slots(provider.provider_id)
-            if not items:
-                continue
-            current = sonnet if stage == "sonnet" else haiku
-            if current is None:
-                continue
-            idx = next((i for i, m in enumerate(items) if m.model_id == current), -1)
-            if idx <= 0:
+            if cur_idx > 0:
+                chosen = nav_ids[cur_idx - 1]
                 if stage == "sonnet":
-                    sonnet = None
+                    sonnet = chosen
                 else:
-                    haiku = None
-                continue
-            chosen = items[idx - 1].model_id
-            if stage == "sonnet":
-                sonnet = chosen
-            else:
-                haiku = chosen
+                    haiku = chosen
             continue
-        if key in (KEY_CTRL_Q, ord("q"), ord("Q")):
-            return AgentSlots()
 
 
 def apply_provider_env(provider: ProviderDefinition) -> None:
@@ -1753,15 +1867,34 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
             os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
         catalog = fetch_models_dev_catalog(force=False)
         apply_context_window_env(model.model_id, catalog, provider.provider_id)
+        # If any slot uses a different provider than the main, switch
+        # to the multi-provider launcher (smart proxy).
+        is_multi = is_multi_provider_needed(provider.provider_id, slots)
+        effective_provider = (
+            next(p for p in PROVIDERS if p.provider_id == "multi")
+            if is_multi else provider
+        )
+        # Strip provider/ prefix from slot models when going through
+        # the smart proxy, since the smart proxy already knows the
+        # backend from the prefix OR from the inferred provider.
+        if is_multi:
+            for slot_name in ("opus", "sonnet", "haiku"):
+                val = getattr(slots, slot_name)
+                if val and "/" in val:
+                    setattr(slots, slot_name, val.split("/", 1)[1])
         if slots.opus:
             os.environ["CLAUDE_HARNESS_SLOT_OPUS"] = slots.opus
         if slots.sonnet:
             os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
         if slots.haiku:
             os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
-        apply_provider_env(provider)
-        args = [provider.launcher]
-        cc_model = model_id_for_claude_code(model.model_id, provider.provider_id, catalog)
+        # Set the main model in the env so claude-multi knows the main
+        if effective_provider.provider_id == "multi":
+            os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
+        apply_provider_env(effective_provider)
+        args = [effective_provider.launcher]
+        cc_model = model_id_for_claude_code(
+            model.model_id, effective_provider.provider_id, catalog)
         if cc_model != "default":
             args.extend(["--model", cc_model])
         args.extend(permission.args)
@@ -1776,15 +1909,30 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
     catalog = fetch_models_dev_catalog(force=False)
     apply_context_window_env(model.model_id, catalog, provider.provider_id)
+    # If any slot uses a different provider than the main, switch
+    # to the multi-provider launcher (smart proxy).
+    is_multi = is_multi_provider_needed(provider.provider_id, slots)
+    effective_provider = (
+        next(p for p in PROVIDERS if p.provider_id == "multi")
+        if is_multi else provider
+    )
+    if is_multi:
+        for slot_name in ("opus", "sonnet", "haiku"):
+            val = getattr(slots, slot_name)
+            if val and "/" in val:
+                setattr(slots, slot_name, val.split("/", 1)[1])
     if slots.opus:
         os.environ["CLAUDE_HARNESS_SLOT_OPUS"] = slots.opus
     if slots.sonnet:
         os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
     if slots.haiku:
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
-    apply_provider_env(provider)
-    args = [provider.launcher]
-    cc_model = model_id_for_claude_code(model.model_id, provider.provider_id, catalog)
+    if effective_provider.provider_id == "multi":
+        os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
+    apply_provider_env(effective_provider)
+    args = [effective_provider.launcher]
+    cc_model = model_id_for_claude_code(
+        model.model_id, effective_provider.provider_id, catalog)
     if cc_model != "default":
         args.extend(["--model", cc_model])
     args.extend(permission.args)

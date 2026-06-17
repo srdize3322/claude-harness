@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Smart routing proxy for multi-provider Claude Code sessions.
+
+Routes each /v1/messages request to the right backend based on the
+`model` field in the body. Lets a single Claude Code process use
+models from different providers in the same session (e.g. main = Opus
+via Anthropic subscription, sonnet slot = gpt-5.4 via Codex, haiku
+slot = MiniMax-M3 via MiniMax).
+
+Backends:
+  claude-*   | anthropic/*  -> Anthropic API (OAuth or ANTHROPIC_AUTH_TOKEN)
+  gpt-*      | codex/*      -> Codex via local codex-proxy.py
+  MiniMax-*  | minimax/*    -> MiniMax API (Anthropic-compatible)
+  openrouter/* |             -> OpenRouter API (Anthropic-compatible)
+  opencode-go/* |            -> OpenCode Go Cloudflare worker
+  other                         -> main backend (env: CLAUDE_HARNESS_MAIN_BACKEND)
+
+Auth sources (auto-detected at startup):
+  Anthropic:  ~/.claude/.credentials.json  (OAuth) or ANTHROPIC_AUTH_TOKEN
+  Codex:      ~/.codex/auth.json            (OAuth via codex-proxy)
+  MiniMax:    ~/.local/share/opencode/auth.json (key "minimax")
+  OpenRouter: ~/.local/share/opencode/auth.json (key "openrouter")
+  OpenCodeGo: ~/.local/share/opencode/auth.json (key "opencode-go")
+
+Usage:
+  smart-proxy.py [--port 8081] [--host 127.0.0.1]
+
+Endpoints:
+  GET  /health      -> JSON status
+  POST /v1/messages -> routed to backend based on model
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_API_BASE = "https://api.anthropic.com"
+ANTHROPIC_VERSION = "2023-06-01"
+MINIMAX_DEFAULT_BASE = "https://api.minimax.io/anthropic"
+OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api"
+OPENCODE_GO_DEFAULT_BASE = "https://opencode-go-proxy.r2gnqdy9c5.workers.dev"
+CODEX_LOCAL_PROXY_DEFAULT = "http://127.0.0.1:8080"
+
+CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
+CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
+OPENCODE_AUTH_PATH = os.path.expanduser("~/.local/share/opencode/auth.json")
+
+# ---------------------------------------------------------------------------
+# Auth loading
+# ---------------------------------------------------------------------------
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_anthropic_auth():
+    """Anthropic: prefer ANTHROPIC_AUTH_TOKEN env, fall back to OAuth."""
+    env_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    if env_token:
+        return {"type": "token", "token": env_token}
+    creds = _read_json(CREDENTIALS_PATH)
+    if isinstance(creds, dict):
+        oauth = creds.get("claudeAiOauth")
+        if isinstance(oauth, dict) and oauth.get("accessToken"):
+            return {"type": "oauth", "access_token": oauth["accessToken"]}
+    return None
+
+
+def load_codex_auth():
+    """Codex: load from ~/.codex/auth.json (consumed by codex-proxy)."""
+    auth = _read_json(CODEX_AUTH_PATH)
+    if not isinstance(auth, dict):
+        return None
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    return {
+        "access_token": tokens.get("access_token", ""),
+        "account_id": tokens.get("account_id", ""),
+        "refresh_token": tokens.get("refresh_token", ""),
+    }
+
+
+def load_opencode_auth():
+    """Read ~/.local/share/opencode/auth.json (may have multiple keys)."""
+    return _read_json(OPENCODE_AUTH_PATH) or {}
+
+
+def get_minimax_key():
+    auth = load_opencode_auth()
+    key = auth.get("minimax", {}).get("key", "")
+    if not key:
+        env = os.environ.get("MINIMAX_API_KEY", "").strip()
+        if env:
+            return env
+        # Try minimax-mcp env file
+        for p in ("~/.config/minimax-mcp/.env", "~/.config/minimax-mcp/.env.local"):
+            full = os.path.expanduser(p)
+            if not os.path.exists(full):
+                continue
+            with open(full, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MINIMAX_API_KEY="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return key
+
+
+def get_openrouter_key():
+    auth = load_opencode_auth()
+    key = auth.get("openrouter", {}).get("key", "")
+    if not key:
+        return os.environ.get("OPENROUTER_API_KEY", "").strip()
+    return key
+
+
+def get_opencode_go_key():
+    auth = load_opencode_auth()
+    key = auth.get("opencode-go", {}).get("key", "")
+    if not key:
+        return os.environ.get("OPENCODE_GO_API_KEY", "").strip()
+    return key
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+def detect_backend(model: str) -> tuple[str, str]:
+    """Map a model name to (backend, clean_model).
+
+    backend is one of: "anthropic", "codex", "minimax", "openrouter",
+    "opencode-go", "main".
+    clean_model is the model name to send to the backend (with any
+    provider prefix stripped).
+    """
+    if not model:
+        return "main", model
+    m = model.strip()
+    ml = m.lower()
+
+    # Explicit provider prefix wins
+    prefix_map = {
+        "anthropic/": "anthropic",
+        "codex/": "codex",
+        "minimax/": "minimax",
+        "openrouter/": "openrouter",
+        "opencode-go/": "opencode-go",
+    }
+    for prefix, backend in prefix_map.items():
+        if ml.startswith(prefix):
+            return backend, m[len(prefix):]
+
+    # Strip [1m] suffix for detection (used by Claude Code for 1M context)
+    bare = re.sub(r"\[(1|2)m\]$", "", ml).strip()
+
+    # Heuristic detection
+    if bare.startswith("claude-") or bare.startswith("claude_"):
+        return "anthropic", m
+    if bare.startswith("gpt-") or bare.startswith("o1") or bare.startswith("o3") \
+            or bare.startswith("o4") or bare.startswith("codex-"):
+        return "codex", m
+    if bare.startswith("minimax-") or bare.startswith("minimax-m") or bare == "minimax-m3":
+        return "minimax", m
+    if bare.startswith("minimax/") or "/" in m and m.split("/")[0] == "minimax":
+        return "minimax", m
+
+    # Fallback to main backend (set by the wrapper)
+    return "main", m
+
+
+# ---------------------------------------------------------------------------
+# Per-backend request handling
+# ---------------------------------------------------------------------------
+
+def _read_anthropic_sse(upstream):
+    """Read an Anthropic SSE response and re-emit it to client."""
+    buffer = ""
+    while True:
+        chunk = upstream.read(4096)
+        if not chunk:
+            break
+        yield chunk
+
+
+def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str, dict, bytes]:
+    """Build request to Anthropic API. Returns (url, headers, body)."""
+    url = ANTHROPIC_API_BASE + "/v1/messages"
+    h = dict(headers)
+    h["anthropic-version"] = ANTHROPIC_VERSION
+    # Always inject our own auth; ignore whatever the client sent.
+    if auth["type"] == "oauth":
+        h["Authorization"] = f"Bearer {auth['access_token']}"
+    elif auth["type"] == "token":
+        h["Authorization"] = f"Bearer {auth['token']}"
+    h.pop("host", None)
+    h.pop("content-length", None)
+    return url, h, json.dumps(body).encode("utf-8")
+
+
+def _build_passthrough_request(base: str, body: dict, headers: dict,
+                               auth_header: str) -> tuple[str, dict, bytes]:
+    """Build request to an Anthropic-compatible backend (passthrough)."""
+    url = base.rstrip("/") + "/v1/messages"
+    h = dict(headers)
+    h["Authorization"] = auth_header
+    h.pop("host", None)
+    h.pop("content-length", None)
+    return url, h, json.dumps(body).encode("utf-8")
+
+
+def _build_codex_request(body: dict, headers: dict,
+                         codex_auth: dict) -> tuple[str, dict, bytes]:
+    """Build request to the local codex-proxy. Injects the right
+    `codex:<token>:<acct>` header that codex-proxy expects.
+    """
+    codex_url = os.environ.get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+    if not codex_url:
+        codex_url = CODEX_LOCAL_PROXY_DEFAULT
+    url = codex_url.rstrip("/") + "/v1/messages?beta=true"
+    h = dict(headers)
+    h.pop("anthropic-version", None)
+    h.pop("host", None)
+    h.pop("content-length", None)
+    if codex_auth.get("access_token") and codex_auth.get("account_id"):
+        h["Authorization"] = (
+            f"codex:{codex_auth['access_token']}:{codex_auth['account_id']}"
+        )
+    return url, h, json.dumps(body).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
+class SmartProxyHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        msg = fmt % args
+        # Redact Authorization / codex: tokens
+        msg = re.sub(r"(Bearer |codex:)[^\s\"']+", r"\1***REDACTED***", msg)
+        sys.stderr.write(f"[smart-proxy] {msg}\n")
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._json(200, {
+                "status": "ok",
+                "smart_proxy": True,
+                "backends": {
+                    "anthropic": load_anthropic_auth() is not None,
+                    "codex": load_codex_auth() is not None,
+                    "minimax": bool(get_minimax_key()),
+                    "openrouter": bool(get_openrouter_key()),
+                    "opencode-go": bool(get_opencode_go_key()),
+                },
+            })
+            return
+        self.send_error(404, "Not Found")
+
+    def do_POST(self):
+        if not self.path.startswith("/v1/messages"):
+            self.send_error(404, "Not Found")
+            return
+        self._handle_messages()
+
+    def _json(self, status: int, body: dict):
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return b""
+        return self.rfile.read(length)
+
+    def _handle_messages(self):
+        raw_body = self._read_body()
+        try:
+            body = json.loads(raw_body) if raw_body else {}
+        except json.JSONDecodeError:
+            return self._error(400, "Invalid JSON body", "invalid_request_error")
+
+        model = body.get("model", "")
+        backend, clean_model = detect_backend(model)
+        if clean_model and clean_model != model:
+            body = dict(body)
+            body["model"] = clean_model
+
+        # Resolve actual backend
+        main_backend = os.environ.get("CLAUDE_HARNESS_MAIN_BACKEND", "").strip()
+        if backend == "main":
+            backend = main_backend or "anthropic"
+
+        # Pass through request headers (sans Host/Content-Length)
+        in_headers = {k: v for k, v in self.headers.items()
+                      if k.lower() not in ("host", "content-length", "connection")}
+
+        try:
+            if backend == "anthropic":
+                auth = load_anthropic_auth()
+                if not auth:
+                    return self._error(401, "Anthropic auth not available", "authentication_error")
+                url, h, data = _build_anthropic_request(body, in_headers, auth)
+            elif backend == "codex":
+                codex_auth = load_codex_auth()
+                if not codex_auth or not codex_auth.get("access_token"):
+                    return self._error(401, "Codex auth not available", "authentication_error")
+                url, h, data = _build_codex_request(body, in_headers, codex_auth)
+            elif backend == "minimax":
+                key = get_minimax_key()
+                if not key:
+                    return self._error(401, "MiniMax API key not configured", "authentication_error")
+                base = os.environ.get("MINIMAX_BASE_URL", "").strip() or MINIMAX_DEFAULT_BASE
+                url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
+            elif backend == "openrouter":
+                key = get_openrouter_key()
+                if not key:
+                    return self._error(401, "OpenRouter API key not configured", "authentication_error")
+                base = os.environ.get("OPENROUTER_BASE_URL", "").strip() or OPENROUTER_DEFAULT_BASE
+                url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
+            elif backend == "opencode-go":
+                key = get_opencode_go_key()
+                if not key:
+                    return self._error(401, "OpenCode Go API key not configured", "authentication_error")
+                base = os.environ.get("OPENCODE_GO_BASE_URL", "").strip() or OPENCODE_GO_DEFAULT_BASE
+                url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
+            else:
+                return self._error(400, f"Unknown backend: {backend}", "invalid_request_error")
+        except Exception as e:
+            return self._error(500, f"Failed to build request: {e}", "api_error")
+
+        # Forward to upstream
+        is_streaming = bool(body.get("stream"))
+        try:
+            req = urllib.request.Request(url, data=data, headers=h, method="POST")
+            upstream = urllib.request.urlopen(req, timeout=None if is_streaming else 600)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="replace")
+            sys.stderr.write(f"[smart-proxy] upstream {e.code}: {err_body[:300]}\n")
+            # Try to parse as JSON, otherwise wrap
+            try:
+                err_json = json.loads(err_body)
+                self.send_response(e.code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(err_body.encode("utf-8"))
+            except json.JSONDecodeError:
+                self._error(e.code, err_body[:500], "api_error")
+            return
+        except Exception as e:
+            return self._error(502, f"Upstream connection failed: {e}", "api_error")
+
+        # Stream or buffer response
+        if is_streaming:
+            self._stream_response(upstream)
+        else:
+            self._buffer_response(upstream)
+
+    def _stream_response(self, upstream):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.wfile.flush()
+
+        client_dead = False
+        try:
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                # Write as chunked transfer encoding
+                self.wfile.write(f"{len(chunk):x}\r\n".encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            client_dead = True
+        except Exception as e:
+            sys.stderr.write(f"[smart-proxy] stream error: {e}\n")
+        finally:
+            try:
+                if not client_dead:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+            except Exception:
+                pass
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+    def _buffer_response(self, upstream):
+        try:
+            data = upstream.read()
+        except Exception as e:
+            return self._error(502, f"Failed to read upstream: {e}", "api_error")
+        self.send_response(200)
+        ct = upstream.headers.get("content-type", "application/json")
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
+
+    def _error(self, status: int, message: str, err_type: str):
+        body = json.dumps({
+            "type": "error",
+            "error": {"type": err_type, "message": message},
+        }).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.wfile.flush()
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Smart routing proxy for Claude Code")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8081)
+    args = parser.parse_args()
+
+    # Pre-load and report which backends are available
+    backends = {
+        "anthropic": load_anthropic_auth() is not None,
+        "codex": load_codex_auth() is not None,
+        "minimax": bool(get_minimax_key()),
+        "openrouter": bool(get_openrouter_key()),
+        "opencode-go": bool(get_opencode_go_key()),
+    }
+    server = ThreadingHTTPServer((args.host, args.port), SmartProxyHandler)
+    sys.stderr.write(f"[smart-proxy] listening on http://{args.host}:{args.port}\n")
+    sys.stderr.write(f"[smart-proxy] backends available: {backends}\n")
+    sys.stderr.write("[smart-proxy] endpoints: GET /health, POST /v1/messages\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        sys.stderr.write("\n[smart-proxy] shutting down\n")
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
