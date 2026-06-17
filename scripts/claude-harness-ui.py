@@ -2748,6 +2748,15 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
 
 def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
            permission: PermissionOption, slots: AgentSlots, extra_args: list[str]) -> None:
+    try:
+        import curses
+        curses.endwin()
+        # Disable application keypad, bracketed paste, and mouse tracking
+        sys.stdout.write("\033[?1l\033[?1000l\033[?1002l\033[?1015l\033[?1006l\033[?2004l")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
     use_plain_defaults = _use_plain_claude_defaults(provider, model)
     if thinking_level == "off" and not use_plain_defaults:
         os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
