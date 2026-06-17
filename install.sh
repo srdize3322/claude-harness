@@ -16,11 +16,19 @@ GITHUB_REPO="${CLAUDE_HARNESS_REPO_URL:-https://github.com/srdize3322/claude-har
 REPO_BRANCH="${CLAUDE_HARNESS_REPO_BRANCH:-main}"
 
 # Convertir github.com/... a raw.githubusercontent.com/...
+# We also support a cache-bust query string for cases where the CDN has
+# stale content (GitHub's raw.githubusercontent.com can take 5+ minutes
+# to invalidate after a push).
 if [[ "$GITHUB_REPO" == https://github.com/* ]]; then
-  RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$REPO_BRANCH"
+  # Use the GitHub API for reliability (no CDN cache). The download()
+  # function below falls back to raw.githubusercontent.com if the API call
+  # fails (e.g., rate limit).
+  RAW_URL="https://api.github.com/repos/${GITHUB_REPO#https://github.com/}/contents"
+  USE_GITHUB_API=1
 else
   # Permitir override completo via CLAUDE_HARNESS_RAW_URL
   RAW_URL="${CLAUDE_HARNESS_RAW_URL:-$GITHUB_REPO}"
+  USE_GITHUB_API=0
 fi
 
 PREFIX="${CLAUDE_HARNESS_PREFIX:-$HOME/.local/share/claude-harness}"
@@ -96,12 +104,38 @@ BASE_URL="$RAW_URL"
 
 download() {
   local src="$1" dst="$2" required="${3:-true}"
-  local url="$BASE_URL/$src"
-  if curl -fsSL --connect-timeout 10 -o "$dst" "$url" 2>/dev/null; then
-    chmod +x "$dst" 2>/dev/null || true
-    dim "$src"
-  elif [ "$required" = "true" ]; then
-    fail "No se pudo descargar: $url"
+  if [ "$USE_GITHUB_API" = "1" ]; then
+    # Use GitHub API to avoid CDN cache staleness on raw.githubusercontent.com.
+    # The API returns base64-encoded content; we decode it.
+    local api_url="$RAW_URL/$src?ref=$REPO_BRANCH"
+    local b64
+    b64=$(curl -fsSL --connect-timeout 10 "$api_url" 2>/dev/null \
+      | python3 -c "import json, sys; print(json.load(sys.stdin).get('content', ''))" 2>/dev/null)
+    if [ -n "$b64" ]; then
+      echo "$b64" | base64 -d > "$dst" 2>/dev/null
+      if [ $? -eq 0 ]; then
+        chmod +x "$dst" 2>/dev/null || true
+        dim "$src"
+        return 0
+      fi
+    fi
+    # Fallback: try raw.githubusercontent.com with cache-bust query
+    local url="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$REPO_BRANCH/$src?ts=$(date +%s)"
+    if curl -fsSL --connect-timeout 10 -o "$dst" "$url" 2>/dev/null; then
+      chmod +x "$dst" 2>/dev/null || true
+      dim "$src (fallback)"
+      return 0
+    fi
+  else
+    local url="$BASE_URL/$src"
+    if curl -fsSL --connect-timeout 10 -o "$dst" "$url" 2>/dev/null; then
+      chmod +x "$dst" 2>/dev/null || true
+      dim "$src"
+      return 0
+    fi
+  fi
+  if [ "$required" = "true" ]; then
+    fail "No se pudo descargar: $src"
   else
     warn "Opcional no disponible: $src"
   fi
