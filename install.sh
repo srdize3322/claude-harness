@@ -105,43 +105,60 @@ BASE_URL="$RAW_URL"
 download() {
   local src="$1" dst="$2" required="${3:-true}"
   if [ "$USE_GITHUB_API" = "1" ]; then
-    # Use GitHub API to avoid CDN cache staleness on raw.githubusercontent.com.
-    # The API returns base64-encoded content; we decode it.
+    # 1. Try GitHub API (returns base64 content; bypasses CDN cache)
     local api_url="$RAW_URL/$src?ref=$REPO_BRANCH"
     local b64
     b64=$(curl -fsSL --connect-timeout 10 "$api_url" 2>/dev/null \
       | python3 -c "import json, sys; print(json.load(sys.stdin).get('content', ''))" 2>/dev/null) || true
     if [ -n "$b64" ]; then
-      echo "$b64" | base64 -d > "$dst" 2>/dev/null
-      if [ $? -eq 0 ]; then
+      if echo "$b64" | base64 -d > "$dst" 2>/dev/null; then
         chmod +x "$dst" 2>/dev/null || true
         dim "$src"
         return 0
       fi
     fi
-    # Fallback 1: try raw.githubusercontent.com with cache-bust query
-    local url="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$REPO_BRANCH/$src?ts=$(date +%s%N)"
-    if curl -fsSL --connect-timeout 10 -o "$dst" "$url" 2>/dev/null; then
-      chmod +x "$dst" 2>/dev/null || true
-      dim "$src (raw)"
-      return 0
+    # 2. Try raw.githubusercontent.com using the commit SHA (not the branch).
+    # Cloudflare's CDN in front of raw.githubusercontent.com caches branch
+    # URLs aggressively; using a SHA guarantees fresh content. We get the
+    # SHA from the local repo if we're inside a clone, otherwise from
+    # the GitHub API (which may also be rate-limited, hence fallback 3).
+    local sha=""
+    if [ -d "$HOME/claude-harness/.git" ]; then
+      sha=$(git -C "$HOME/claude-harness" rev-parse HEAD 2>/dev/null || true)
     fi
-    # Fallback 2: download the full tarball and extract just this file.
-    # Tarballs are versioned by commit SHA so CDN can't serve stale content.
-    local tar_url="https://codeload.github.com/${GITHUB_REPO#https://github.com/}/tar.gz/$REPO_BRANCH"
-    if command -v tar >/dev/null 2>&1; then
+    if [ -z "$sha" ]; then
+      sha=$(curl -fsSL --connect-timeout 10 "https://api.github.com/repos/${GITHUB_REPO#https://github.com/}/commits/$REPO_BRANCH" 2>/dev/null \
+        | python3 -c "import json, sys; print(json.load(sys.stdin).get('sha', ''))" 2>/dev/null) || true
+    fi
+    if [ -n "$sha" ]; then
+      local raw_url="https://raw.githubusercontent.com/${GITHUB_REPO#https://github.com/}/$sha/$src"
+      if curl -fsSL --connect-timeout 15 -o "$dst" "$raw_url" 2>/dev/null; then
+        chmod +x "$dst" 2>/dev/null || true
+        dim "$src (sha)"
+        return 0
+      fi
+    fi
+    # 3. Last resort: download the full tarball and extract. Tarballs are
+    # content-addressed by commit SHA so they cannot serve stale content.
+    if command -v tar >/dev/null 2>&1 && [ -n "$sha" ]; then
       local tmp_tar
       tmp_tar="$(mktemp)"
-      if curl -fsSL --connect-timeout 30 -o "$tmp_tar" "$tar_url" 2>/dev/null; then
-        # Find the file in the tarball (top-level dir is "<repo>-<sha>")
-        if tar -tzf "$tmp_tar" 2>/dev/null | grep -E "/${src}\$" >/dev/null 2>&1; then
-          tar -xzf "$tmp_tar" -C "$(dirname "$dst")" --strip-components=1 \
-            "$(tar -tzf "$tmp_tar" 2>/dev/null | grep -E "/${src}\$" | head -1 | xargs -I{} dirname {} | sed 's|/[^/]*$||')/${src}" \
-            2>/dev/null \
-            && chmod +x "$dst" 2>/dev/null \
-            && dim "$src (tarball)" \
-            && rm -f "$tmp_tar" \
-            && return 0
+      local tar_url="https://codeload.github.com/${GITHUB_REPO#https://github.com/}/tar.gz/$sha"
+      if curl -fsSL --connect-timeout 60 -o "$tmp_tar" "$tar_url" 2>/dev/null; then
+        local entry
+        entry=$(tar -tzf "$tmp_tar" 2>/dev/null | grep -E "/${src}\$" | head -1)
+        if [ -n "$entry" ]; then
+          tar -xzf "$tmp_tar" -C "$(dirname "$dst")" "$entry" 2>/dev/null
+          # Tarball extracts to <repo>-<short_sha>/<src>; move it to dst
+          local extracted="$(dirname "$dst")/$entry"
+          if [ -f "$extracted" ]; then
+            mv "$extracted" "$dst"
+            chmod +x "$dst" 2>/dev/null || true
+            dim "$src (tarball)"
+            rm -rf "$(dirname "$dst")/${entry%%/*}" 2>/dev/null || true
+            rm -f "$tmp_tar"
+            return 0
+          fi
         fi
         rm -f "$tmp_tar"
       fi
