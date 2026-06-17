@@ -10,7 +10,8 @@
 # Required: smart-proxy.py on PATH or in same dir.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_FILE="$(readlink -f "$0" 2>/dev/null || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_FILE")" && pwd)"
 SMART_PROXY="${SMART_PROXY:-$SCRIPT_DIR/smart-proxy.py}"
 CODEX_PROXY="${CODEX_PROXY:-$SCRIPT_DIR/codex-proxy.py}"
 

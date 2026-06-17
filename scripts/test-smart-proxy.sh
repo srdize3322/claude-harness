@@ -46,6 +46,7 @@ MINIMAX_OK=0
 [ -f "$HOME/.local/share/opencode/auth.json" ] && MINIMAX_OK=1
 
 header "Setup: start smart-proxy and codex-proxy"
+export CLAUDE_HARNESS_CODEX_PROXY_URL="http://${HOST}:${PORT_CODEX}"
 python3 "$SMART_PROXY" --port "$PORT_SMART" >/tmp/sp-test.log 2>&1 &
 PIDS+=($!)
 sleep 1
