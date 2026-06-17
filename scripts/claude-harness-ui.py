@@ -514,23 +514,60 @@ def is_anthropic_model(model_id: str | None, provider_id: str | None) -> bool:
     return False
 
 
-def model_id_for_claude_code(model_id: str, provider_id: str | None) -> str:
-    """Agrega [1m] suffix para modelos no-Anthropic.
+# Anthropic 1M-context model names that Claude Code recognizes with [1m].
+# Source: strings dump of Claude Code 2.1.178 binary, plus models.dev.
+# DO NOT add claude-sonnet-4-5 or claude-haiku-4-5 here: they are 200k.
+ANTHROPIC_1M_MODEL_NAMES = frozenset({
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+})
 
-    Claude Code internamente tiene un truco: si el model name contiene [1m],
-    trata al modelo como 1M context window (Jf/H detection). Antes de mandar
-    el model a la API, strippea el [1m] via normalizeModelStringForAPI (aO).
-    Asi que es seguro agregar el suffix: el display muestra 1M, la API recibe
-    el nombre limpio.
+
+def model_id_for_claude_code(model_id: str, provider_id: str | None,
+                             catalog: dict[str, dict[str, dict]] | None = None) -> str:
+    """Agrega [1m] suffix SOLO para modelos que Claude Code lo reconoce.
+
+    Claude Code reconoce el truco [1m] unicamente para sus propios modelos
+    con 1M context (claude-opus-4-6[1m], claude-sonnet-4-6[1m], etc.).
+    Para modelos OpenAI (gpt-5.4-mini, gpt-5.5, etc.) el truco NO funciona:
+    Claude Code hace strip del [1m], busca el modelo en su catalogo
+    interno, no lo encuentra, y muestra el default de 200k. Agregar [1m]
+    ahi solo confunde y, peor, hace que el auto-compact threshold se
+    compute mal (1M * 0.9 = 900k en vez de 400k * 0.9 = 360k).
+
+    Para modelos no-Anthropic usamos CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    (configurado en apply_context_window_env) para que el auto-compact
+    respete el context real. El display caera a 200k (limitacion de
+    Claude Code para modelos fuera de su catalogo), pero la logica de
+    compact esta bien seteada.
     """
     if not model_id or model_id == "default":
-        return model_id
-    if is_anthropic_model(model_id, provider_id):
         return model_id
     ml = model_id.lower()
     if "[1m]" in ml or "[2m]" in ml:
         return model_id
-    return f"{model_id}[1m]"
+    # Solo Anthropic: el [1m] funciona en Claude Code
+    if is_anthropic_model(model_id, provider_id):
+        # 1) Si tenemos catalog, verificar context real
+        info = _lookup_model_info(model_id, catalog, provider_id)
+        if info and isinstance(info, dict):
+            ctx = info.get("limit", {}).get("context")
+            if isinstance(ctx, (int, float)) and ctx >= 1_000_000:
+                return f"{model_id}[1m]"
+            return model_id
+        # 2) Sin catalog: usar lista hardcoded de modelos Anthropic 1M
+        #    que Claude Code reconoce con [1m]
+        bare = model_id.split("/")[-1].lower()
+        if bare in ANTHROPIC_1M_MODEL_NAMES:
+            return f"{model_id}[1m]"
+        return model_id
+    # No-Anthropic: NO agregar [1m]. Claude Code no lo reconocera y
+    # el auto-compact ya se configura via CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+    return model_id
 
 
 def _claude_code_known_context(model_id: str) -> int:
@@ -570,7 +607,7 @@ def apply_context_window_env(model_id: str, catalog: dict[str, dict[str, dict]] 
             "threshold": threshold,
             "auto_compact": True,
         }
-    cc_model = model_id_for_claude_code(model_id, provider_id)
+    cc_model = model_id_for_claude_code(model_id, provider_id, catalog)
     known_ctx = _claude_code_known_context(cc_model)
     threshold = int(real_ctx * 0.9)
     if "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in os.environ:
@@ -1651,7 +1688,7 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
             os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
         apply_provider_env(provider)
         args = [provider.launcher]
-        cc_model = model_id_for_claude_code(model.model_id, provider.provider_id)
+        cc_model = model_id_for_claude_code(model.model_id, provider.provider_id, catalog)
         if cc_model != "default":
             args.extend(["--model", cc_model])
         args.extend(permission.args)
@@ -1674,7 +1711,7 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
     apply_provider_env(provider)
     args = [provider.launcher]
-    cc_model = model_id_for_claude_code(model.model_id, provider.provider_id)
+    cc_model = model_id_for_claude_code(model.model_id, provider.provider_id, catalog)
     if cc_model != "default":
         args.extend(["--model", cc_model])
     args.extend(permission.args)
