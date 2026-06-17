@@ -9,7 +9,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -123,14 +123,27 @@ class AgentSlots:
     -> Codex, ``MiniMax-`` -> MiniMax) and from any ``provider/``
     prefix in the id.
 
-    If a slot's model comes from a different provider than the main
-    session, the TUI will route the launch through the multi-provider
-    smart proxy (claude-multi) so a single Claude Code process can use
-    models from different backends.
+    The TUI only exposes cross-provider slot choices when the user
+    explicitly selects the dedicated multi-provider mode.
     """
     opus: str | None = None
     sonnet: str | None = None
     haiku: str | None = None
+
+
+@dataclass
+class ScreenResult:
+    action: str
+    value: object | None = None
+
+
+@dataclass
+class WizardState:
+    provider: ProviderDefinition | None = None
+    model: ModelItem | None = None
+    thinking: str | None = None
+    permission: PermissionOption | None = None
+    slots: AgentSlots = field(default_factory=AgentSlots)
 
 
 # Models that Claude Code can recognize via [1m] suffix. Keep in sync
@@ -184,9 +197,56 @@ def get_all_models_all_providers() -> list[tuple[str, str, str]]:
     return out
 
 
+def get_slot_models_for_provider(provider_id: str) -> list[tuple[str, str, str]]:
+    """Return slot model options for a specific provider.
+
+    Normal providers only expose their own models. The explicit
+    multi-provider flow is the only place where cross-provider mixing is
+    offered.
+    """
+    if provider_id == "multi":
+        return get_all_models_all_providers()
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for model in get_provider_models_for_slots(provider_id):
+        if model.model_id == "default" or model.model_id in seen:
+            continue
+        seen.add(model.model_id)
+        out.append((model.model_id, model.label, provider_id))
+    return out
+
+
+def get_multi_provider_main_models(provider_id: str, force_refresh: bool = False) -> list[ModelItem]:
+    """Return models for the main multi-provider picker.
+
+    The returned model ids stay prefixed as ``provider/model`` so the
+    smart proxy can route the main session correctly after launch.
+    """
+    provider = find_provider(provider_id)
+    if provider is None or provider.provider_id == "multi":
+        return []
+    models = fetch_models_for_provider(provider, force_refresh=force_refresh)
+    out: list[ModelItem] = []
+    seen: set[str] = set()
+    for model in models:
+        if model.model_id == "default":
+            continue
+        prefixed_id = f"{provider_id}/{model.model_id}"
+        if prefixed_id in seen:
+            continue
+        seen.add(prefixed_id)
+        out.append(ModelItem(
+            prefixed_id,
+            model.label,
+            model.reasoning,
+            model.reasoning_options,
+        ))
+    return out
+
+
 def infer_provider_for_model(model_id: str | None) -> str | None:
-    """Best-effort provider inference for a model id, used to decide
-    whether the multi-provider launcher is needed.
+    """Best-effort provider inference for a model id, used for labels
+    and for the explicit multi-provider flow.
 
     Returns one of ALL_PROVIDER_IDS or None.
     """
@@ -218,16 +278,8 @@ def infer_provider_for_model(model_id: str | None) -> str | None:
 
 
 def is_multi_provider_needed(main_provider: str | None, slots: AgentSlots) -> bool:
-    """True if any slot uses a different provider than the main one."""
-    if main_provider is None:
-        return False
-    for slot_value in (slots.opus, slots.sonnet, slots.haiku):
-        if not slot_value:
-            continue
-        prov = infer_provider_for_model(slot_value)
-        if prov and prov != main_provider:
-            return True
-    return False
+    """The smart proxy is reserved for explicit multi-provider sessions."""
+    return main_provider == "multi"
 
 
 PROVIDERS = [
@@ -241,8 +293,8 @@ PROVIDERS = [
                        default_model_env="CLAUDE_HARNESS_MINIMAX_MODEL"),
     ProviderDefinition("codex", "Codex", CLAUDE_CODEX_LAUNCHER, "codex",
                        default_model_env="CLAUDE_HARNESS_CODEX_MODEL"),
-    # Multi-provider: routes each request to the right backend based
-    # on model name. Auto-selected when slots use different providers.
+    # Multi-provider: explicit smart-proxy mode that routes each
+    # request to the right backend based on model name.
     ProviderDefinition("multi", "Multi-provider (smart proxy)", CLAUDE_MULTI_LAUNCHER,
                        "claude", default_model_env="CLAUDE_HARNESS_MULTI_MODEL"),
 ]
@@ -596,13 +648,75 @@ PROVIDER_TO_CATALOG_ID = {
     "claude": "anthropic",
 }
 
+CLAUDE_FAMILY_ALIASES = {"opus", "sonnet", "haiku", "fable", "mythos"}
+
+
+def _resolve_claude_family_alias(model_id: str, catalog: dict[str, dict[str, dict]] | None) -> str:
+    """Resolve bare Claude family aliases like ``opus`` to the latest
+    pinned Anthropic model id present in the catalog.
+
+    This is used for context-window math and display only; the launcher
+    can still pass the user-facing alias to Claude Code.
+    """
+    if not model_id:
+        return model_id
+    bare = model_id.split("/")[-1].lower()
+    if bare not in CLAUDE_FAMILY_ALIASES:
+        return model_id
+    if not catalog:
+        return model_id
+    anthropic_models = catalog.get("anthropic", {})
+    if not isinstance(anthropic_models, dict):
+        return model_id
+    prefix = f"claude-{bare}-"
+    candidates = [mid for mid in anthropic_models.keys() if isinstance(mid, str) and mid.startswith(prefix)]
+    if not candidates:
+        return model_id
+
+    def rank(mid: str) -> tuple[int, int, int, int, str]:
+        suffix = mid[len(prefix):]
+        parts = suffix.split("-")
+        major = 0
+        minor = 0
+        date = 0
+        dateless = 0
+        if parts:
+            try:
+                major = int(parts[0])
+            except ValueError:
+                major = 0
+        if len(parts) > 1:
+            if parts[1].isdigit() and len(parts[1]) <= 2:
+                minor = int(parts[1])
+            elif parts[1].isdigit() and len(parts[1]) >= 6:
+                date = int(parts[1])
+        if len(parts) == 2:
+            dateless = 1
+        if len(parts) > 2 and parts[2].isdigit() and len(parts[2]) >= 6:
+            date = int(parts[2])
+        return (major, minor, dateless, date, mid)
+
+    best = max(candidates, key=rank)
+    return best
+
+
+def _normalize_model_id_for_context(model_id: str, provider_id: str | None,
+                                    catalog: dict[str, dict[str, dict]] | None) -> str:
+    if not model_id:
+        return model_id
+    lookup_model_id = model_id.split("/")[-1] if provider_id == "multi" and "/" in model_id else model_id
+    if provider_id in ("claude", "multi", "openrouter"):
+        return _resolve_claude_family_alias(lookup_model_id, catalog)
+    return lookup_model_id
+
 
 def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None,
                        provider_id: str | None = None) -> dict | None:
     if not catalog:
         return None
+    normalized = _normalize_model_id_for_context(model_id, provider_id, catalog)
     # Strip provider/ prefix (used in multi picker) for catalog lookup
-    bare = model_id.split("/")[-1] if model_id else ""
+    bare = normalized.split("/")[-1] if normalized else ""
     # Multi-provider: infer the actual provider from the prefix so we
     # look up the model in the right catalog section.
     lookup_provider_id = provider_id
@@ -621,7 +735,7 @@ def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None
         cat_id = PROVIDER_TO_CATALOG_ID.get(lookup_provider_id, lookup_provider_id)
         prov_models = catalog.get(cat_id)
         if isinstance(prov_models, dict):
-            for cand in (model_id, bare, model_id.lower(), bare.lower()):
+            for cand in (normalized, bare, normalized.lower(), bare.lower()):
                 if cand in prov_models:
                     return prov_models[cand]
     needle = bare.lower()
@@ -1144,6 +1258,7 @@ KEY_CTRL_R = chr(18)
 KEY_CTRL_S = chr(19)
 KEY_CTRL_X = chr(24)
 KEY_ESC = chr(27)
+TOTAL_WIZARD_STEPS = 6
 
 HAS_COLORS = False
 CP_TITLE = 0
@@ -1236,6 +1351,50 @@ def draw_footer(stdscr, text: str) -> None:
         pass
 
 
+def format_slot_display(slot_value: str | None, main_model: ModelItem | None) -> str:
+    if not slot_value:
+        return "= main"
+    if main_model and slot_value == main_model.model_id:
+        return "= main"
+    return slot_value
+
+
+def draw_wizard_chrome(stdscr, state: WizardState, step_num: int, title: str,
+                       subtitle: str = "", query: str | None = None,
+                       message: str = "", message_cp: int | None = None) -> int:
+    header_subtitle = f"Paso {step_num}/{TOTAL_WIZARD_STEPS}"
+    if subtitle:
+        header_subtitle += f"  |  {subtitle}"
+    draw_header(stdscr, title, header_subtitle)
+
+    provider = state.provider.label if state.provider else "-"
+    model = state.model.label if state.model else "-"
+    thinking = state.thinking or "-"
+    permission = state.permission.label if state.permission else "-"
+    slots_text = (
+        f"sonnet={format_slot_display(state.slots.sonnet, state.model)}  "
+        f"haiku={format_slot_display(state.slots.haiku, state.model)}"
+    )
+    safe_addstr(stdscr, 3, 0, f"Provider: {provider}  |  Modelo: {model}", attr_pair(CP_DIM))
+    safe_addstr(
+        stdscr,
+        4,
+        0,
+        f"Thinking: {thinking}  |  Permisos: {permission}  |  Slots: {slots_text}",
+        attr_pair(CP_DIM),
+    )
+
+    row = 6
+    if query is not None:
+        search_text = query if query else "escribe para buscar"
+        safe_addstr(stdscr, row, 0, f"Buscar: {search_text}", attr_pair(CP_HINT))
+        row += 1
+    if message:
+        safe_addstr(stdscr, row, 0, message, attr_pair(message_cp or CP_HINT))
+        row += 1
+    return row + 1
+
+
 def safe_addstr(stdscr, y: int, x: int, text: str, attr: int = 0) -> None:
     try:
         if attr:
@@ -1273,12 +1432,27 @@ def run_external_in_curses(stdscr, args: list[str], stdin_text: str | None = Non
     stdscr.refresh()
 
 
-def draw_provider_list(stdscr, providers, statuses, index: int) -> None:
+def draw_provider_list(stdscr, providers, statuses, index: int, query: str,
+                       state: WizardState) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    draw_header(stdscr, "Claude Harness", "Selecciona un proveedor")
+    message = ""
+    message_cp = CP_HINT
+    if not providers:
+        message = "Sin coincidencias para la búsqueda actual."
+        message_cp = CP_WARN
+    row = draw_wizard_chrome(
+        stdscr,
+        state,
+        1,
+        "Claude Harness",
+        subtitle=f"{len(providers)} providers visibles",
+        query=query,
+        message=message,
+        message_cp=message_cp,
+    )
     for i, p in enumerate(providers):
-        y = 3 + i
+        y = row + i
         if y >= h - 2:
             break
         s = statuses[i]
@@ -1302,7 +1476,7 @@ def draw_provider_list(stdscr, providers, statuses, index: int) -> None:
         if line_w < w - 1:
             status_x = max(line_w + 2, w - len(status_text) - 4)
             safe_addstr(stdscr, y, status_x, f"[{status_text}]", attr_pair(status_cp))
-    draw_footer(stdscr, "[Enter] elegir  [Ctrl+L] login  [Ctrl+R] refresh  [Esc] salir")
+    draw_footer(stdscr, "[Enter] elegir  [Ctrl+L] login  [Ctrl+R] refresh  [Backspace] borrar  [Esc] salir")
 
 
 def draw_login_menu(stdscr, provider, index: int) -> None:
@@ -1427,47 +1601,70 @@ def prompt_codex_proxy_url(stdscr) -> None:
     stdscr.refresh()
 
 
-def pick_provider(stdscr) -> ProviderDefinition | None:
+def pick_provider(stdscr, state: WizardState) -> ScreenResult:
     statuses = [get_provider_status(p) for p in PROVIDERS]
+    query = ""
     index = 0
     while True:
-        draw_provider_list(stdscr, PROVIDERS, statuses, index)
+        filtered_indices = [
+            i for i, provider in enumerate(PROVIDERS)
+            if not query or query.lower() in provider.label.lower() or query.lower() in provider.provider_id.lower()
+        ]
+        filtered_providers = [PROVIDERS[i] for i in filtered_indices]
+        filtered_statuses = [statuses[i] for i in filtered_indices]
+        if index >= len(filtered_providers):
+            index = max(0, len(filtered_providers) - 1)
+        draw_provider_list(stdscr, filtered_providers, filtered_statuses, index, query, state)
         stdscr.refresh()
         key = stdscr.getch()
         if key == -1:
             continue
         if key in (27, ord("q"), ord("Q")):
-            return None
+            return ScreenResult("cancel")
         if key == curses.KEY_UP:
-            index = (index - 1) % len(PROVIDERS)
+            if filtered_providers:
+                index = (index - 1) % len(filtered_providers)
         elif key == curses.KEY_DOWN:
-            index = (index + 1) % len(PROVIDERS)
+            if filtered_providers:
+                index = (index + 1) % len(filtered_providers)
         elif key == curses.KEY_HOME or key == curses.KEY_PPAGE:
             index = 0
         elif key == curses.KEY_END or key == curses.KEY_NPAGE:
-            index = len(PROVIDERS) - 1
+            index = max(0, len(filtered_providers) - 1)
         elif key in (curses.KEY_ENTER, 10, 13):
-            p = PROVIDERS[index]
-            if not statuses[index].logged_in:
+            if not filtered_providers:
+                continue
+            p = filtered_providers[index]
+            provider_status = filtered_statuses[index]
+            if not provider_status.logged_in:
                 # Multi-provider has no login of its own; it just needs
                 # 2+ other backends logged in. If we get here, show the
                 # message and don't try to run the login menu.
                 if p.provider_id == "multi":
                     show_message(stdscr, [
                         p.label,
-                        statuses[index].detail,
+                        provider_status.detail,
                         "Logueate en 2+ providers primero.",
                     ])
                     continue
                 if run_login_menu(stdscr, p):
                     statuses = [get_provider_status(pp) for pp in PROVIDERS]
                 continue
-            return p
+            return ScreenResult("next", p)
         elif key == KEY_CTRL_L or key == ord("l") or key == ord("L"):
-            if run_login_menu(stdscr, PROVIDERS[index]):
+            if filtered_providers and run_login_menu(stdscr, filtered_providers[index]):
                 statuses = [get_provider_status(pp) for pp in PROVIDERS]
         elif key == KEY_CTRL_R or key == ord("r") or key == ord("R"):
             statuses = [get_provider_status(pp) for pp in PROVIDERS]
+        elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+            if query:
+                query = query[:-1]
+                index = 0
+        elif key in (KEY_CTRL_C, 3):
+            return ScreenResult("cancel")
+        elif 32 <= key <= 126:
+            query += chr(key)
+            index = 0
 
 
 def run_login_menu(stdscr, provider) -> bool:
@@ -1494,17 +1691,21 @@ def run_login_menu(stdscr, provider) -> bool:
 
 def draw_model_list(stdscr, provider, models, filtered, favs, default_model,
                     query: str, show_favs_only: bool, scroll: int, sel: int,
-                    error: str = "") -> None:
+                    error: str = "", wizard_state: WizardState | None = None,
+                    subtitle_override: str | None = None) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    subtitle = f"{provider.label}  |  {len(filtered)} modelos"
+    subtitle = subtitle_override or f"{provider.label}  |  {len(filtered)} modelos"
     if show_favs_only:
         subtitle += "  |  solo favoritos"
-    if query:
-        subtitle += f"  |  buscar: {query}"
-    draw_header(stdscr, "Modelos", subtitle)
-
-    row = 3
+    row = draw_wizard_chrome(
+        stdscr,
+        wizard_state or WizardState(provider=provider),
+        2,
+        "Modelos",
+        subtitle=subtitle,
+        query=query,
+    )
     if error:
         safe_addstr(stdscr, row, 0, f"! {error}", attr_pair(CP_DANGER))
         row += 1
@@ -1540,10 +1741,207 @@ def draw_model_list(stdscr, provider, models, filtered, favs, default_model,
         if len(filtered) > PAGE_SIZE:
             info = f" {scroll+1}-{min(len(filtered), scroll+PAGE_SIZE)} de {len(filtered)}"
             safe_addstr(stdscr, h - 2, w - len(info) - 1, info, attr_pair(CP_DIM))
-    draw_footer(stdscr, "[Enter] elegir  [Ctrl+S] fav  [Ctrl+D] default  [Ctrl+F] filtro  [Ctrl+R] recargar  [Esc] volver  escribe para buscar")
+    draw_footer(stdscr, "[Enter] elegir  [Ctrl+S] fav  [Ctrl+D] default  [Ctrl+F] filtro  [Ctrl+R] recargar  [Backspace] borrar  [Esc] limpiar/volver")
 
 
-def pick_model(stdscr, provider) -> ModelItem | None:
+def draw_multi_provider_main_provider_list(stdscr, wizard_state: WizardState, query: str,
+                                           provider_ids: list[str], sel: int) -> None:
+    stdscr.erase()
+    row = draw_wizard_chrome(
+        stdscr,
+        wizard_state,
+        2,
+        "Modelos",
+        subtitle="Multi-provider  |  elige backend para el modelo principal",
+        query=query,
+        message="Selecciona primero el provider y después busca el modelo.",
+        message_cp=CP_HINT,
+    )
+    for i, provider_id in enumerate(provider_ids):
+        y = row + i
+        is_sel = (i == sel)
+        marker = "> " if is_sel else "  "
+        attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
+        safe_addstr(stdscr, y, 0, f"{marker}{ALL_PROVIDER_LABELS.get(provider_id, provider_id)}", attr)
+    if not provider_ids:
+        safe_addstr(stdscr, row, 0, "  Sin coincidencias para la búsqueda actual.", attr_pair(CP_WARN))
+    draw_footer(stdscr, "[Enter] elegir provider  [Backspace] borrar  [Esc] volver  escribe para buscar")
+
+
+def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
+    provider_query = ""
+    provider_sel = 0
+    selected_provider_id: str | None = None
+    models: list[ModelItem] = []
+    error = ""
+    favs = load_favorites().get(provider.provider_id, [])
+    default_model = get_default_model(provider)
+    query = ""
+    show_favs_only = False
+    scroll = 0
+    sel = 0
+
+    while True:
+        if selected_provider_id is None:
+            filtered_provider_ids = [
+                prov_id for prov_id in ALL_PROVIDER_IDS
+                if not provider_query
+                or provider_query.lower() in ALL_PROVIDER_LABELS.get(prov_id, prov_id).lower()
+                or provider_query.lower() in prov_id.lower()
+            ]
+            if provider_sel >= len(filtered_provider_ids):
+                provider_sel = max(0, len(filtered_provider_ids) - 1)
+            draw_multi_provider_main_provider_list(
+                stdscr,
+                wizard_state,
+                provider_query,
+                filtered_provider_ids,
+                provider_sel,
+            )
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == -1:
+                continue
+            if key == 27:
+                return ScreenResult("back")
+            if key == curses.KEY_UP and filtered_provider_ids:
+                provider_sel = (provider_sel - 1) % len(filtered_provider_ids)
+            elif key == curses.KEY_DOWN and filtered_provider_ids:
+                provider_sel = (provider_sel + 1) % len(filtered_provider_ids)
+            elif key in (curses.KEY_HOME, curses.KEY_PPAGE):
+                provider_sel = 0
+            elif key in (curses.KEY_END, curses.KEY_NPAGE):
+                provider_sel = max(0, len(filtered_provider_ids) - 1)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if not filtered_provider_ids:
+                    continue
+                selected_provider_id = filtered_provider_ids[provider_sel]
+                try:
+                    models = get_multi_provider_main_models(selected_provider_id, force_refresh=True)
+                    error = ""
+                except Exception as e:
+                    models = []
+                    error = str(e)
+                query = ""
+                show_favs_only = False
+                scroll = 0
+                sel = 0
+            elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+                if provider_query:
+                    provider_query = provider_query[:-1]
+                    provider_sel = 0
+            elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+                return ScreenResult("back")
+            elif key in (KEY_CTRL_C, 3):
+                return ScreenResult("cancel")
+            elif 32 <= key <= 126:
+                provider_query += chr(key)
+                provider_sel = 0
+            continue
+
+        base = models
+        if query:
+            ql = query.lower()
+            base = [m for m in models if ql in m.model_id.lower() or ql in m.label.lower()]
+        filtered = [m for m in base if m.model_id in favs] if show_favs_only else base
+        if sel >= len(filtered):
+            sel = max(0, len(filtered) - 1)
+        if sel < scroll:
+            scroll = sel
+        if sel >= scroll + PAGE_SIZE:
+            scroll = sel - PAGE_SIZE + 1
+
+        current_state = WizardState(
+            provider=wizard_state.provider,
+            model=wizard_state.model,
+            thinking=wizard_state.thinking,
+            permission=wizard_state.permission,
+            slots=wizard_state.slots,
+        )
+        draw_model_list(
+            stdscr,
+            provider,
+            models,
+            filtered,
+            favs,
+            default_model,
+            query,
+            show_favs_only,
+            scroll,
+            sel,
+            error=error,
+            wizard_state=current_state,
+            subtitle_override=(
+                f"Multi-provider  |  {ALL_PROVIDER_LABELS.get(selected_provider_id, selected_provider_id)}"
+                f"  |  {len(filtered)} modelos"
+            ),
+        )
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key == -1:
+            continue
+        if key == 27:
+            if query:
+                query = ""
+                sel = 0
+                scroll = 0
+                continue
+            selected_provider_id = None
+            provider_query = ""
+            provider_sel = 0
+            continue
+        elif key == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif key == curses.KEY_DOWN:
+            sel = min(max(0, len(filtered) - 1), sel + 1)
+        elif key == curses.KEY_PPAGE:
+            sel = max(0, sel - PAGE_SIZE)
+        elif key == curses.KEY_NPAGE:
+            sel = min(max(0, len(filtered) - 1), sel + PAGE_SIZE)
+        elif key == curses.KEY_HOME:
+            sel = 0
+        elif key == curses.KEY_END:
+            sel = max(0, len(filtered) - 1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if filtered:
+                return ScreenResult("next", filtered[sel])
+        elif key == KEY_CTRL_R:
+            try:
+                models = get_multi_provider_main_models(selected_provider_id, force_refresh=True)
+                error = ""
+            except Exception as e:
+                error = str(e)
+        elif key == KEY_CTRL_S:
+            if filtered:
+                toggle_favorite(provider.provider_id, filtered[sel].model_id)
+                favs = load_favorites().get(provider.provider_id, [])
+        elif key == KEY_CTRL_D:
+            if filtered:
+                set_default_model(provider, filtered[sel].model_id)
+                default_model = filtered[sel].model_id
+        elif key == KEY_CTRL_F:
+            show_favs_only = not show_favs_only
+            sel = 0
+        elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+            selected_provider_id = None
+            provider_query = ""
+            provider_sel = 0
+        elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+            if query:
+                query = query[:-1]
+                sel = 0
+                scroll = 0
+        elif key in (KEY_CTRL_C, 3):
+            return ScreenResult("cancel")
+        elif 32 <= key <= 126:
+            query += chr(key)
+            sel = 0
+            scroll = 0
+
+
+def pick_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
+    if provider.provider_id == "multi":
+        return pick_multi_provider_main_model(stdscr, provider, wizard_state)
     try:
         models = fetch_models_for_provider(provider, force_refresh=True)
     except Exception as e:
@@ -1573,13 +1971,18 @@ def pick_model(stdscr, provider) -> ModelItem | None:
         if sel >= scroll + PAGE_SIZE:
             scroll = sel - PAGE_SIZE + 1
         draw_model_list(stdscr, provider, models, filtered, favs, default_model,
-                        query, show_favs_only, scroll, sel, error)
+                        query, show_favs_only, scroll, sel, error, wizard_state)
         stdscr.refresh()
         key = stdscr.getch()
         if key == -1:
             continue
         if key == 27:
-            return None
+            if query:
+                query = ""
+                sel = 0
+                scroll = 0
+                continue
+            return ScreenResult("back")
         elif key == curses.KEY_UP:
             sel = max(0, sel - 1)
         elif key == curses.KEY_DOWN:
@@ -1594,7 +1997,7 @@ def pick_model(stdscr, provider) -> ModelItem | None:
             sel = max(0, len(filtered) - 1)
         elif key in (curses.KEY_ENTER, 10, 13):
             if filtered:
-                return filtered[sel]
+                return ScreenResult("next", filtered[sel])
         elif key == KEY_CTRL_R:
             try:
                 models = fetch_models_for_provider(provider, force_refresh=True)
@@ -1615,14 +2018,14 @@ def pick_model(stdscr, provider) -> ModelItem | None:
             show_favs_only = not show_favs_only
             sel = 0
         elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
-            return None
+            return ScreenResult("back")
         elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
             if query:
                 query = query[:-1]
                 sel = 0
                 scroll = 0
         elif key in (KEY_CTRL_C, 3):
-            return None
+            return ScreenResult("cancel")
         else:
             if 32 <= key <= 126:
                 query += chr(key)
@@ -1634,14 +2037,21 @@ def pick_model(stdscr, provider) -> ModelItem | None:
                 scroll = 0
 
 
-def draw_thinking_list(stdscr, options, index: int, provider, model, caps_str: str, caps) -> None:
+def draw_thinking_list(stdscr, options, index: int, provider, model, caps_str: str, caps,
+                       wizard_state: WizardState, query: str, no_match: bool) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    draw_header(stdscr, f"Thinking: {provider.label}")
-    safe_addstr(stdscr, 3, 0, f"Modelo: {model.label}", attr_pair(CP_DIM))
-    if caps_str:
-        safe_addstr(stdscr, 4, 0, f"Modo: {caps_str}", attr_pair(CP_DIM))
-    list_start = 6
+    message = "Sin coincidencias; se muestra la lista completa." if no_match else ""
+    list_start = draw_wizard_chrome(
+        stdscr,
+        wizard_state,
+        3,
+        f"Thinking: {provider.label}",
+        subtitle=caps_str or model.label,
+        query=query,
+        message=message,
+        message_cp=CP_WARN if no_match else CP_HINT,
+    )
     footer_lines = 4
     for i, (key, label) in enumerate(options):
         y = list_start + i
@@ -1657,48 +2067,69 @@ def draw_thinking_list(stdscr, options, index: int, provider, model, caps_str: s
         preview_y = h - footer_lines
         preview = format_thinking_params(sel_params)
         safe_addstr(stdscr, preview_y, 0, f"API payload: {{ ... \"{preview}\" }}", attr_pair(CP_HINT) | attr_bold())
-    draw_footer(stdscr, "[Enter] elegir  [Esc] volver  flechas para navegar")
+    draw_footer(stdscr, "[Enter] elegir  [Backspace] borrar  [Esc] volver  escribe para buscar")
 
 
-def pick_thinking(stdscr, provider, model) -> str:
-    options = get_thinking_options(model.model_id, model.reasoning, model.reasoning_options or [])
+def pick_thinking(stdscr, provider, model, wizard_state: WizardState) -> ScreenResult:
+    all_options = get_thinking_options(model.model_id, model.reasoning, model.reasoning_options or [])
     caps = detect_thinking_capabilities(model.model_id, model.reasoning_options or [])
     caps_str = caps.label
-    non_off = [o for o in options if o[0] != "off"]
-    default_key = non_off[0][0] if non_off else options[0][0]
+    query = ""
     index = 0
-    for i, o in enumerate(options):
-        if o[0] == default_key:
-            index = i
-            break
     while True:
-        draw_thinking_list(stdscr, options, index, provider, model, caps_str, caps)
+        filtered = [o for o in all_options if not query or query.lower() in o[0].lower() or query.lower() in o[1].lower()]
+        no_match = bool(query) and not filtered
+        visible_options = filtered or all_options
+        if index >= len(visible_options):
+            index = max(0, len(visible_options) - 1)
+        draw_thinking_list(stdscr, visible_options, index, provider, model, caps_str, caps,
+                           wizard_state, query, no_match)
         stdscr.refresh()
         key = stdscr.getch()
         if key == -1:
             continue
         if key == 27:
-            return ""
+            return ScreenResult("back")
         if key == curses.KEY_UP:
-            index = (index - 1) % len(options)
+            index = (index - 1) % len(visible_options)
         elif key == curses.KEY_DOWN:
-            index = (index + 1) % len(options)
+            index = (index + 1) % len(visible_options)
         elif key == curses.KEY_HOME:
             index = 0
         elif key == curses.KEY_END:
-            index = len(options) - 1
+            index = len(visible_options) - 1
         elif key in (curses.KEY_ENTER, 10, 13):
-            return options[index][0]
+            return ScreenResult("next", visible_options[index][0])
         elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
-            return ""
+            return ScreenResult("back")
+        elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+            if query:
+                query = query[:-1]
+                index = 0
+        elif key in (KEY_CTRL_C, 3):
+            return ScreenResult("cancel")
+        elif 32 <= key <= 126:
+            query += chr(key)
+            index = 0
 
 
-def draw_permission_list(stdscr, options, index: int, provider) -> None:
+def draw_permission_list(stdscr, options, index: int, provider, wizard_state: WizardState,
+                         query: str, no_match: bool) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    draw_header(stdscr, f"Permisos: {provider.label}")
+    message = "Sin coincidencias; se muestra la lista completa." if no_match else ""
+    row = draw_wizard_chrome(
+        stdscr,
+        wizard_state,
+        5,
+        f"Permisos: {provider.label}",
+        subtitle=f"{len(options)} opciones",
+        query=query,
+        message=message,
+        message_cp=CP_WARN if no_match else CP_HINT,
+    )
     for i, o in enumerate(options):
-        y = 3 + i
+        y = row + i
         if y >= h - 2:
             break
         is_sel = (i == index)
@@ -1708,34 +2139,60 @@ def draw_permission_list(stdscr, options, index: int, provider) -> None:
         if is_danger and not is_sel:
             attr = attr_pair(CP_DANGER)
         safe_addstr(stdscr, y, 0, f"{marker}{i+1}. {o.label}", attr)
-    draw_footer(stdscr, "[Enter] elegir  [Esc] volver  flechas para navegar")
+    draw_footer(stdscr, "[Enter] elegir  [Backspace] borrar  [Esc] volver  escribe para buscar")
 
 
-def pick_permission(stdscr, provider) -> PermissionOption | None:
-    options = PERMISSION_OPTIONS[provider.family]
+def pick_permission(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
+    all_options = PERMISSION_OPTIONS[provider.family]
+    query = ""
     index = 0
     while True:
-        draw_permission_list(stdscr, options, index, provider)
+        filtered = [o for o in all_options if not query or query.lower() in o.label.lower()]
+        no_match = bool(query) and not filtered
+        options = filtered or all_options
+        if index >= len(options):
+            index = max(0, len(options) - 1)
+        draw_permission_list(stdscr, options, index, provider, wizard_state, query, no_match)
         stdscr.refresh()
         key = stdscr.getch()
         if key == -1:
             continue
         if key == 27:
-            return None
+            return ScreenResult("back")
         if key == curses.KEY_UP:
             index = (index - 1) % len(options)
         elif key == curses.KEY_DOWN:
             index = (index + 1) % len(options)
+        elif key == curses.KEY_HOME:
+            index = 0
+        elif key == curses.KEY_END:
+            index = len(options) - 1
         elif key in (curses.KEY_ENTER, 10, 13):
-            return options[index]
+            return ScreenResult("next", options[index])
         elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
-            return None
+            return ScreenResult("back")
+        elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+            if query:
+                query = query[:-1]
+                index = 0
+        elif key in (KEY_CTRL_C, 3):
+            return ScreenResult("cancel")
+        elif 32 <= key <= 126:
+            query += chr(key)
+            index = 0
 
 
-def confirm_launch(stdscr, provider, model, thinking_level, permission, slots) -> bool:
+def confirm_launch(stdscr, provider, model, thinking_level, permission, slots,
+                   wizard_state: WizardState) -> ScreenResult:
     h, w = stdscr.getmaxyx()
     stdscr.erase()
-    draw_header(stdscr, "Listo para abrir Claude Code")
+    row = draw_wizard_chrome(
+        stdscr,
+        wizard_state,
+        6,
+        "Listo para abrir Claude Code",
+        subtitle="revisa la configuración antes de lanzar",
+    )
     caps = detect_thinking_capabilities(model.model_id, model.reasoning_options or [])
     payload = build_thinking_params(thinking_level, caps)
     catalog = fetch_models_dev_catalog(force=False)
@@ -1765,16 +2222,16 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots) -
         f"Permisos:  {permission.label}",
     ]
     for i, line in enumerate(lines):
-        safe_addstr(stdscr, 3 + i, 0, line, attr_pair(CP_DIM) if i > 0 else attr_pair(CP_TITLE) | attr_bold())
+        safe_addstr(stdscr, row + i, 0, line, attr_pair(CP_DIM) if i > 0 else attr_pair(CP_TITLE) | attr_bold())
     if slots and (slots.opus or slots.sonnet or slots.haiku):
-        safe_addstr(stdscr, 7, 0, "Subagentes:", attr_pair(CP_TITLE) | attr_bold())
+        safe_addstr(stdscr, row + 5, 0, "Subagentes:", attr_pair(CP_TITLE) | attr_bold())
         main = model.model_id
         opus_str = slots.opus if slots.opus else f"{main} (= main)"
         sonnet_str = slots.sonnet if slots.sonnet else f"{main} (= main)"
         haiku_str = slots.haiku if slots.haiku else f"{main} (= main)"
-        safe_addstr(stdscr, 8, 0, f"  opus:   {opus_str}", attr_pair(CP_DIM))
-        safe_addstr(stdscr, 9, 0, f"  sonnet: {sonnet_str}", attr_pair(CP_DIM))
-        safe_addstr(stdscr, 10, 0, f"  haiku:  {haiku_str}", attr_pair(CP_DIM))
+        safe_addstr(stdscr, row + 6, 0, f"  opus:   {opus_str}", attr_pair(CP_DIM))
+        safe_addstr(stdscr, row + 7, 0, f"  sonnet: {sonnet_str}", attr_pair(CP_DIM))
+        safe_addstr(stdscr, row + 8, 0, f"  haiku:  {haiku_str}", attr_pair(CP_DIM))
     hint = ""
     if thinking_level == "off":
         hint = "Thinking desactivado (CLAUDE_CODE_DISABLE_THINKING=1)"
@@ -1787,17 +2244,20 @@ def confirm_launch(stdscr, provider, model, thinking_level, permission, slots) -
         else:
             hint = comp_hint
     if hint:
-        row = 12 if slots and (slots.opus or slots.sonnet or slots.haiku) else 8
+        hint_row = row + (9 if slots and (slots.opus or slots.sonnet or slots.haiku) else 5)
         for i, hl in enumerate(hint.split("\n")):
-            safe_addstr(stdscr, row + i, 0, hl, attr_pair(CP_HINT))
-    row2 = 14 if slots and (slots.opus or slots.sonnet or slots.haiku) else 10
+            safe_addstr(stdscr, hint_row + i, 0, hl, attr_pair(CP_HINT))
+    row2 = row + (11 if slots and (slots.opus or slots.sonnet or slots.haiku) else 7)
     safe_addstr(stdscr, row2, 0, "Enter: abrir Claude  |  Esc: volver", attr_pair(CP_DIM))
     stdscr.refresh()
     key = stdscr.getch()
     if key == 27:
-        return False
+        return ScreenResult("back")
     if key in (curses.KEY_ENTER, 10, 13):
-        return True
+        return ScreenResult("next")
+    if key in (KEY_CTRL_C, 3):
+        return ScreenResult("cancel")
+    return ScreenResult("back")
 
 
 def _flatten_all_models_for_slots() -> list[tuple[str, str, str]]:
@@ -1808,19 +2268,35 @@ def _flatten_all_models_for_slots() -> list[tuple[str, str, str]]:
     return get_all_models_all_providers()
 
 
-def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
-                       sub_stage: str = "provider",
-                       sub_prov: str | None = None,
-                       sub_models: list[tuple[str, str, str]] | None = None,
-                       sub_query: str = "",
-                       sub_scroll: int = 0,
-                       sub_sel: int = 0) -> None:
+def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, sonnet, haiku, stage,
+                      sub_stage: str = "provider",
+                      sub_prov: str | None = None,
+                      sub_models: list[tuple[str, str, str]] | None = None,
+                      sub_query: str = "",
+                      sub_scroll: int = 0,
+                      sub_sel: int = 0,
+                      provider_options: list[str] | None = None,
+                      no_match: bool = False) -> None:
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    draw_header(stdscr, f"Subagentes: {provider.label}", f"main = {main_model.label}")
+    if provider.provider_id == "multi":
+        subtitle = "mezcla entre providers habilitada"
+    else:
+        subtitle = f"solo modelos de {provider.label}"
+    message = "Sin coincidencias; se muestran las opciones base." if no_match else ""
+    list_start = draw_wizard_chrome(
+        stdscr,
+        wizard_state,
+        4,
+        f"Subagentes: {provider.label}",
+        subtitle=subtitle,
+        query=sub_query,
+        message=message,
+        message_cp=CP_WARN if no_match else CP_HINT,
+    )
 
     # Slot headers (always visible)
-    section1_row = 5
+    section1_row = list_start
     if stage == "sonnet":
         safe_addstr(stdscr, section1_row, 0, "  > slot sonnet:", attr_pair(CP_TITLE) | attr_bold())
     else:
@@ -1830,7 +2306,7 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
     safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}",
                 attr_pair(CP_HINT) if sonnet else attr_pair(CP_DIM))
 
-    section2_row = 6
+    section2_row = section1_row + 1
     if stage == "haiku":
         safe_addstr(stdscr, section2_row, 0, "  > slot haiku:", attr_pair(CP_TITLE) | attr_bold())
     else:
@@ -1841,11 +2317,12 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
                 attr_pair(CP_HINT) if haiku else attr_pair(CP_DIM))
 
     # Show sub-stage UI: provider picker or model picker
-    list_start = 9
+    list_start = section2_row + 3
     current_slot_value = sonnet if stage == "sonnet" else haiku
     if sub_stage == "provider":
         safe_addstr(stdscr, list_start - 1, 0,
                     f"  Elegi provider para slot {stage}:", attr_pair(CP_HINT))
+        provider_options = provider_options or []
         # Option: "= main" (uses main provider's main model)
         row = list_start
         if current_slot_value is None:
@@ -1856,19 +2333,19 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
             attr = curses.A_NORMAL
         safe_addstr(stdscr, row, 0,
                     f"  {marker} = main  (default = {main_model.label})", attr)
-        # Provider options (max 6)
-        for i, prov_id in enumerate(ALL_PROVIDER_IDS):
+        # Provider options (filtered by search)
+        for i, prov_id in enumerate(provider_options):
             row = list_start + 1 + i
             if row >= h - 3:
                 break
-            # sub_sel: 0 = "= main", 1..5 = providers (in ALL_PROVIDER_IDS order)
+            # sub_sel: 0 = "= main", 1..len(provider_options) = filtered providers
             is_sel = (sub_sel == i + 1)
             marker = ">" if is_sel else " "
             attr = attr_pair(CP_SELECT) | attr_bold() if is_sel else curses.A_NORMAL
             safe_addstr(stdscr, row, 0,
                         f"  {marker} {ALL_PROVIDER_LABELS.get(prov_id, prov_id)}",
                         attr)
-        draw_footer(stdscr, "Enter: elegir  Esc: volver al slot anterior")
+        draw_footer(stdscr, "Enter: elegir  [Backspace] borrar  [Esc] volver  escribe para buscar")
     else:
         # sub_stage == "model": show model picker for sub_prov
         prov_label = ALL_PROVIDER_LABELS.get(sub_prov, sub_prov or "?")
@@ -1883,12 +2360,13 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
         if sub_models is None:
             sub_models = []
         ql = sub_query.lower()
-        filtered = [m for m in sub_models
-                    if not ql or ql in m[0].lower() or ql in m[1].lower()]
+        filtered = [m for m in sub_models if not ql or ql in m[0].lower() or ql in m[1].lower()]
+        if not filtered and sub_query:
+            filtered = sub_models
         # Visible window
         total = len(filtered)
-        if sub_sel >= total:
-            sub_sel = max(0, total - 1)
+        if sub_sel > total:
+            sub_sel = total
         if sub_sel < sub_scroll:
             sub_scroll = sub_sel
         if sub_sel >= sub_scroll + PAGE_SIZE:
@@ -1918,45 +2396,64 @@ def draw_slots_picker(stdscr, provider, main_model, sonnet, haiku, stage,
             safe_addstr(stdscr, h - 1, 0,
                         f"  {sub_scroll + 1}-{min(total, sub_scroll + PAGE_SIZE)} de {total}",
                         attr_pair(CP_DIM))
-        draw_footer(stdscr, "Enter: elegir  Esc: volver a providers  type: buscar")
+        footer = "Enter: elegir  [Backspace] borrar  [Esc] volver"
+        if provider.provider_id == "multi":
+            footer += " a providers"
+        footer += "  escribe para buscar"
+        draw_footer(stdscr, footer)
 
 
-def pick_agent_slots(stdscr, provider, main_model) -> AgentSlots:
-    """Pick sonnet and haiku slots with provider -> model navigation.
+def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) -> ScreenResult:
+    """Pick sonnet and haiku slots.
 
-    Flow per slot:
-      1. Pick provider (= main | Anthropic | Codex | MiniMax | OpenRouter | OpenCode Go)
-      2. If a real provider: search/filter model list (max 8 visible)
-      3. Or stay on "= main" to use the main session's model
+    Normal providers only allow models from the chosen provider.
+    Multi-provider keeps the extra provider-selection substep.
     """
-    slots = AgentSlots()
-    sonnet: str | None = None
-    haiku: str | None = None
-    # Load all models grouped by provider for the slot picker
-    all_models_by_prov: dict[str, list[tuple[str, str, str]]] = {p: [] for p in ALL_PROVIDER_IDS}
-    for mid, label, prov in _flatten_all_models_for_slots():
-        if prov in all_models_by_prov:
-            all_models_by_prov[prov].append((mid, label, prov))
-    return _pick_slots_loop(stdscr, provider, main_model, slots,
-                            sonnet, haiku, all_models_by_prov)
+    sonnet = wizard_state.slots.sonnet
+    haiku = wizard_state.slots.haiku
+    if provider.provider_id == "multi":
+        all_models_by_prov = {pid: get_slot_models_for_provider(pid) for pid in ALL_PROVIDER_IDS}
+    else:
+        all_models_by_prov = {provider.provider_id: get_slot_models_for_provider(provider.provider_id)}
 
+    def reset_stage_context(current_stage: str) -> tuple[str, str | None, list[tuple[str, str, str]] | None]:
+        if provider.provider_id == "multi":
+            return "provider", None, None
+        return "model", provider.provider_id, all_models_by_prov.get(provider.provider_id, [])
 
-def _pick_slots_loop(stdscr, provider, main_model,
-                     slots: AgentSlots,
-                     sonnet: str | None, haiku: str | None,
-                     all_models_by_prov: dict) -> AgentSlots:
     stage = "sonnet"
     while True:
-        sub_stage = "provider"
-        sub_prov: str | None = None
-        sub_models: list | None = None
+        sub_stage, sub_prov, sub_models = reset_stage_context(stage)
         sub_query = ""
         sub_scroll = 0
         sub_sel = 0
         # Inner loop: navigate provider -> model -> done for this slot
         while True:
+            provider_options = [
+                prov_id for prov_id in ALL_PROVIDER_IDS
+                if not sub_query
+                or sub_query.lower() in ALL_PROVIDER_LABELS.get(prov_id, prov_id).lower()
+                or sub_query.lower() in prov_id.lower()
+            ]
+            no_match = False
+            if sub_stage == "provider" and sub_query and not provider_options:
+                provider_options = list(ALL_PROVIDER_IDS)
+                no_match = True
+            elif sub_stage == "model" and sub_query:
+                current_models = sub_models or []
+                no_match = not any(
+                    sub_query.lower() in mid.lower() or sub_query.lower() in label.lower()
+                    for mid, label, _ in current_models
+                )
+            current_state = WizardState(
+                provider=wizard_state.provider,
+                model=wizard_state.model,
+                thinking=wizard_state.thinking,
+                permission=wizard_state.permission,
+                slots=AgentSlots(sonnet=sonnet, haiku=haiku),
+            )
             draw_slots_picker(
-                stdscr, provider, main_model,
+                stdscr, current_state, provider, main_model,
                 sonnet, haiku, stage,
                 sub_stage=sub_stage,
                 sub_prov=sub_prov,
@@ -1964,26 +2461,28 @@ def _pick_slots_loop(stdscr, provider, main_model,
                 sub_query=sub_query,
                 sub_scroll=sub_scroll,
                 sub_sel=sub_sel,
+                provider_options=provider_options,
+                no_match=no_match,
             )
             stdscr.refresh()
             key = stdscr.getch()
             if key == -1:
                 continue
             if key == 27:  # ESC
-                if sub_stage == "model":
-                    sub_stage = "provider"
-                    sub_prov = None
-                    sub_models = None
+                if sub_query:
                     sub_query = ""
                     sub_scroll = 0
                     sub_sel = 0
                     continue
-                # Back out of slot picker entirely
-                if stage == "haiku":
-                    stage = "sonnet"
-                else:
-                    return AgentSlots()
-                break
+                if sub_stage == "model":
+                    if provider.provider_id == "multi":
+                        sub_stage = "provider"
+                        sub_prov = None
+                        sub_models = None
+                        sub_scroll = 0
+                        sub_sel = 0
+                        continue
+                return ScreenResult("back")
             if sub_stage == "provider":
                 # Provider picker
                 if key in (curses.KEY_ENTER, 10, 13):
@@ -1994,10 +2493,14 @@ def _pick_slots_loop(stdscr, provider, main_model,
                             sonnet = None
                         else:
                             haiku = None
+                        if stage == "sonnet":
+                            stage = "haiku"
+                            break
+                        return ScreenResult("next", AgentSlots(sonnet=sonnet, haiku=haiku))
                     else:
                         idx = sub_sel - 1
-                        if 0 <= idx < len(ALL_PROVIDER_IDS):
-                            sub_prov = ALL_PROVIDER_IDS[idx]
+                        if 0 <= idx < len(provider_options):
+                            sub_prov = provider_options[idx]
                             sub_models = all_models_by_prov.get(sub_prov, [])
                             sub_stage = "model"
                             sub_query = ""
@@ -2005,23 +2508,26 @@ def _pick_slots_loop(stdscr, provider, main_model,
                             sub_sel = 0
                             continue
                 elif key == curses.KEY_DOWN:
-                    sub_sel = min(len(ALL_PROVIDER_IDS), sub_sel + 1)
+                    sub_sel = min(len(provider_options), sub_sel + 1)
                 elif key == curses.KEY_UP:
                     sub_sel = max(0, sub_sel - 1)
-                else:
-                    # Accept arrow letters as provider shortcuts
-                    if key in (ord("a"), ord("A")):
-                        sub_sel = 1
-                    elif key in (ord("c"), ord("C")):
-                        sub_sel = 2
-                    elif key in (ord("m"), ord("M")):
-                        sub_sel = 3
-                    elif key in (ord("o"), ord("O")):
-                        sub_sel = 4
-                    elif key in (ord("g"), ord("G")):
-                        sub_sel = 5
+                elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+                    if sub_query:
+                        sub_query = sub_query[:-1]
+                        sub_sel = 0
+                elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+                    return ScreenResult("back")
+                elif key in (KEY_CTRL_C, 3):
+                    return ScreenResult("cancel")
+                elif 32 <= key <= 126:
+                    sub_query += chr(key)
+                    sub_sel = 0
             else:
                 # Model picker
+                filtered = [m for m in (sub_models or [])
+                            if not sub_query or sub_query.lower() in m[0].lower() or sub_query.lower() in m[1].lower()]
+                if not filtered and sub_query:
+                    filtered = sub_models or []
                 if key in (curses.KEY_ENTER, 10, 13):
                     if sub_sel == 0:
                         # "= main"
@@ -2030,9 +2536,6 @@ def _pick_slots_loop(stdscr, provider, main_model,
                         else:
                             haiku = None
                     else:
-                        ql = sub_query.lower()
-                        filtered = [m for m in (sub_models or [])
-                                    if not ql or ql in m[0].lower() or ql in m[1].lower()]
                         idx = sub_sel - 1
                         if 0 <= idx < len(filtered):
                             chosen = filtered[idx][0]
@@ -2044,36 +2547,29 @@ def _pick_slots_loop(stdscr, provider, main_model,
                     if stage == "sonnet":
                         stage = "haiku"
                     else:
-                        return AgentSlots(sonnet=sonnet, haiku=haiku)
+                        return ScreenResult("next", AgentSlots(sonnet=sonnet, haiku=haiku))
                     break
                 elif key == curses.KEY_DOWN:
-                    ql = sub_query.lower()
-                    filtered = [m for m in (sub_models or [])
-                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
-                    sub_sel = min(1 + len(filtered), sub_sel + 1)
+                    sub_sel = min(len(filtered), sub_sel + 1)
                 elif key == curses.KEY_UP:
                     sub_sel = max(0, sub_sel - 1)
                 elif key == curses.KEY_PPAGE:
                     sub_sel = max(0, sub_sel - PAGE_SIZE)
                 elif key == curses.KEY_NPAGE:
-                    ql = sub_query.lower()
-                    filtered = [m for m in (sub_models or [])
-                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
-                    sub_sel = min(1 + len(filtered), sub_sel + PAGE_SIZE)
+                    sub_sel = min(len(filtered), sub_sel + PAGE_SIZE)
                 elif key == curses.KEY_HOME:
                     sub_sel = 0
                 elif key == curses.KEY_END:
-                    ql = sub_query.lower()
-                    filtered = [m for m in (sub_models or [])
-                                if not ql or ql in m[0].lower() or ql in m[1].lower()]
-                    sub_sel = 1 + len(filtered) - 1
+                    sub_sel = len(filtered)
                 elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
                     if sub_query:
                         sub_query = sub_query[:-1]
                         sub_sel = 0
                         sub_scroll = 0
-                elif key in (KEY_CTRL_Q, ord("q"), ord("Q"), KEY_CTRL_C, 3):
-                    return AgentSlots()
+                elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+                    return ScreenResult("back")
+                elif key in (KEY_CTRL_C, 3):
+                    return ScreenResult("cancel")
                 else:
                     if 32 <= key <= 126:
                         sub_query += chr(key)
@@ -2102,66 +2598,100 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
         fetch_models_dev_catalog(force=False)
     except Exception:
         pass
+    state = WizardState()
+    step = "provider"
     while True:
-        provider = pick_provider(stdscr)
-        if provider is None:
-            curses.endwin()
-            print("\nChau.")
+        if step == "provider":
+            result = pick_provider(stdscr, state)
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nChau.")
+                return
+            state.provider = result.value
+            if not state.provider.supports_claude_launch:
+                show_message(stdscr, [state.provider.label, "solo login/configuracion", state.provider.launch_block_reason or ""])
+                continue
+            state.model = None
+            state.thinking = None
+            state.permission = None
+            state.slots = AgentSlots()
+            step = "model"
+            continue
+
+        if step == "model":
+            result = pick_model(stdscr, state.provider, state)
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nInterrumpido.")
+                return
+            if result.action == "back":
+                step = "provider"
+                continue
+            state.model = result.value
+            state.thinking = None
+            state.permission = None
+            state.slots = AgentSlots()
+            step = "thinking"
+            continue
+
+        if step == "thinking":
+            result = pick_thinking(stdscr, state.provider, state.model, state)
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nInterrumpido.")
+                return
+            if result.action == "back":
+                step = "model"
+                continue
+            state.thinking = result.value
+            step = "slots"
+            continue
+
+        if step == "slots":
+            result = pick_agent_slots(stdscr, state.provider, state.model, state)
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nInterrumpido.")
+                return
+            if result.action == "back":
+                step = "thinking"
+                continue
+            state.slots = result.value
+            step = "permission"
+            continue
+
+        if step == "permission":
+            result = pick_permission(stdscr, state.provider, state)
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nInterrumpido.")
+                return
+            if result.action == "back":
+                step = "slots"
+                continue
+            state.permission = result.value
+            step = "confirm"
+            continue
+
+        if step == "confirm":
+            result = confirm_launch(
+                stdscr,
+                state.provider,
+                state.model,
+                state.thinking,
+                state.permission,
+                state.slots,
+                state,
+            )
+            if result.action == "cancel":
+                curses.endwin()
+                print("\nInterrumpido.")
+                return
+            if result.action == "back":
+                step = "permission"
+                continue
+            launch(state.provider, state.model, state.thinking, state.permission, state.slots, extra_args)
             return
-        if not provider.supports_claude_launch:
-            show_message(stdscr, [provider.label, "solo login/configuracion", provider.launch_block_reason or ""])
-            continue
-        model = pick_model(stdscr, provider)
-        if model is None:
-            continue
-        thinking_level = pick_thinking(stdscr, provider, model)
-        if not thinking_level:
-            continue
-        slots = pick_agent_slots(stdscr, provider, model)
-        permission = pick_permission(stdscr, provider)
-        if permission is None:
-            continue
-        if not confirm_launch(stdscr, provider, model, thinking_level, permission, slots):
-            continue
-        curses.endwin()
-        if thinking_level == "off":
-            os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
-        catalog = fetch_models_dev_catalog(force=False)
-        apply_context_window_env(model.model_id, catalog, provider.provider_id)
-        # If any slot uses a different provider than the main, switch
-        # to the multi-provider launcher (smart proxy).
-        is_multi = is_multi_provider_needed(provider.provider_id, slots)
-        effective_provider = (
-            next(p for p in PROVIDERS if p.provider_id == "multi")
-            if is_multi else provider
-        )
-        # Strip provider/ prefix from slot models when going through
-        # the smart proxy, since the smart proxy already knows the
-        # backend from the prefix OR from the inferred provider.
-        if is_multi:
-            for slot_name in ("opus", "sonnet", "haiku"):
-                val = getattr(slots, slot_name)
-                if val and "/" in val:
-                    setattr(slots, slot_name, val.split("/", 1)[1])
-        if slots.opus:
-            os.environ["CLAUDE_HARNESS_SLOT_OPUS"] = slots.opus
-        if slots.sonnet:
-            os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
-        if slots.haiku:
-            os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
-        # Set the main model in the env so claude-multi knows the main
-        if effective_provider.provider_id == "multi":
-            os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
-        apply_provider_env(effective_provider)
-        args = [effective_provider.launcher]
-        cc_model = model_id_for_claude_code(
-            model.model_id, effective_provider.provider_id, catalog)
-        if cc_model != "default":
-            args.extend(["--model", cc_model])
-        args.extend(permission.args)
-        args.extend(extra_args)
-        os.execv(args[0], args)
-        return
 
 
 def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
@@ -2170,8 +2700,8 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_CODE_DISABLE_THINKING"] = "1"
     catalog = fetch_models_dev_catalog(force=False)
     apply_context_window_env(model.model_id, catalog, provider.provider_id)
-    # If any slot uses a different provider than the main, switch
-    # to the multi-provider launcher (smart proxy).
+    # The smart proxy is used only when the main provider is the
+    # explicit multi-provider mode.
     is_multi = is_multi_provider_needed(provider.provider_id, slots)
     effective_provider = (
         next(p for p in PROVIDERS if p.provider_id == "multi")
