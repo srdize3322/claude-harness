@@ -514,59 +514,52 @@ def is_anthropic_model(model_id: str | None, provider_id: str | None) -> bool:
     return False
 
 
-# Anthropic 1M-context model names that Claude Code recognizes with [1m].
-# Source: strings dump of Claude Code 2.1.178 binary, plus models.dev.
-# DO NOT add claude-sonnet-4-5 or claude-haiku-4-5 here: they are 200k.
-ANTHROPIC_1M_MODEL_NAMES = frozenset({
-    "claude-fable-5",
-    "claude-mythos-5",
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-})
-
-
 def model_id_for_claude_code(model_id: str, provider_id: str | None,
                              catalog: dict[str, dict[str, dict]] | None = None) -> str:
-    """Agrega [1m] suffix SOLO para modelos que Claude Code lo reconoce.
+    """Agrega [1m] suffix de forma adaptativa segun el context real del modelo.
 
-    Claude Code reconoce el truco [1m] unicamente para sus propios modelos
-    con 1M context (claude-opus-4-6[1m], claude-sonnet-4-6[1m], etc.).
-    Para modelos OpenAI (gpt-5.4-mini, gpt-5.5, etc.) el truco NO funciona:
-    Claude Code hace strip del [1m], busca el modelo en su catalogo
-    interno, no lo encuentra, y muestra el default de 200k. Agregar [1m]
-    ahi solo confunde y, peor, hace que el auto-compact threshold se
-    compute mal (1M * 0.9 = 900k en vez de 400k * 0.9 = 360k).
+    Reglas (todas basadas en datos del catalog de models.dev, sin listas
+    hardcoded):
 
-    Para modelos no-Anthropic usamos CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    (configurado en apply_context_window_env) para que el auto-compact
-    respete el context real. El display caera a 200k (limitacion de
-    Claude Code para modelos fuera de su catalogo), pero la logica de
-    compact esta bien seteada.
+    1. Si el modelo es Anthropic y su context real (models.dev) >= 1M,
+       agregar [1m]. Claude Code reconoce el truco [1m] para sus modelos
+       1M (claude-opus-4-6[1m], claude-sonnet-4-6[1m], etc.) y muestra
+       1M en /context.
+
+    2. Si el modelo es Anthropic y su context real < 1M, NO agregar [1m].
+       Claude Code conoce su context real internamente.
+
+    3. Si el modelo no esta en el catalog, no agregar [1m] (conservador).
+       El usuario puede forzar agregando manualmente o actualizando
+       models.dev.
+
+    4. Si el modelo NO es Anthropic, NUNCA agregar [1m]. Claude Code no
+       reconoce el truco para OpenAI/Codex/etc. (hace strip del [1m],
+       busca el modelo en su catalogo interno, no lo encuentra, muestra
+       200k). Ademas, agregar [1m] a un modelo OpenAI de 400k haria que
+       el auto-compact threshold se compute mal (1M * 0.9 = 900k en
+       vez de 400k * 0.9 = 360k).
+
+    El auto-compact threshold se configura via CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    en apply_context_window_env() para que respete el context real aunque
+    el display de Claude Code muestre 200k.
     """
     if not model_id or model_id == "default":
         return model_id
     ml = model_id.lower()
     if "[1m]" in ml or "[2m]" in ml:
         return model_id
-    # Solo Anthropic: el [1m] funciona en Claude Code
-    if is_anthropic_model(model_id, provider_id):
-        # 1) Si tenemos catalog, verificar context real
-        info = _lookup_model_info(model_id, catalog, provider_id)
-        if info and isinstance(info, dict):
-            ctx = info.get("limit", {}).get("context")
-            if isinstance(ctx, (int, float)) and ctx >= 1_000_000:
-                return f"{model_id}[1m]"
-            return model_id
-        # 2) Sin catalog: usar lista hardcoded de modelos Anthropic 1M
-        #    que Claude Code reconoce con [1m]
-        bare = model_id.split("/")[-1].lower()
-        if bare in ANTHROPIC_1M_MODEL_NAMES:
+    # No-Anthropic: nunca agregar [1m]
+    if not is_anthropic_model(model_id, provider_id):
+        return model_id
+    # Anthropic: consultar catalog (data externa) para decidir
+    info = _lookup_model_info(model_id, catalog, provider_id)
+    if info and isinstance(info, dict):
+        ctx = info.get("limit", {}).get("context")
+        if isinstance(ctx, (int, float)) and ctx >= 1_000_000:
             return f"{model_id}[1m]"
         return model_id
-    # No-Anthropic: NO agregar [1m]. Claude Code no lo reconocera y
-    # el auto-compact ya se configura via CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+    # Sin datos en catalog: conservador, no agregar [1m]
     return model_id
 
 
