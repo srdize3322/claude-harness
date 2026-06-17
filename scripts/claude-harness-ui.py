@@ -143,7 +143,6 @@ PROVIDERS = [
     ProviderDefinition("minimax", "MiniMax", CLAUDE_MINIMAX_LAUNCHER, "claude",
                        default_model_env="CLAUDE_HARNESS_MINIMAX_MODEL"),
     ProviderDefinition("codex", "Codex", CLAUDE_CODEX_LAUNCHER, "codex",
-                       supports_claude_launch=False, launch_block_reason="solo login/configuracion",
                        default_model_env="CLAUDE_HARNESS_CODEX_MODEL"),
 ]
 
@@ -272,11 +271,20 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
         has_key = bool(get_minimax_api_key())
         return ProviderStatus(has_key, "login ok" if has_key else "falta login")
     if provider.provider_id == "codex":
+        import shutil
         import subprocess as sp
+        if not shutil.which("codex"):
+            return ProviderStatus(False, "falta codex CLI (brew install codex)")
         result = sp.run(["codex", "login", "status"], capture_output=True, text=True)
         output = " ".join(p.strip() for p in [result.stdout, result.stderr] if p.strip()).lower()
-        logged_in = "logged in" in output
-        return ProviderStatus(logged_in, "login ok" if logged_in else "falta login")
+        if "logged in" not in output:
+            return ProviderStatus(False, "falta login (Ctrl+L para device auth)")
+        proxy_url = os.environ.get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+        if not proxy_url:
+            proxy_url = load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+        if not proxy_url:
+            return ProviderStatus(False, "falta CLAUDE_HARNESS_CODEX_PROXY_URL (Ctrl+L para configurar)")
+        return ProviderStatus(True, "login ok")
     return ProviderStatus(False, "desconocido")
 
 
@@ -1003,6 +1011,7 @@ def login_actions_for(pid: str):
                 ("API key manual", None)]
     if pid == "codex":
         return [("Device auth (link device)", lambda: ["codex", "login", "--device-auth"]),
+                ("Set proxy URL", "codex-proxy-url"),
                 ("API key manual", None)]
     return []
 
@@ -1015,6 +1024,10 @@ def do_login_action(stdscr, provider, idx: int) -> None:
     if action is None:
         prompt_api_key(stdscr, provider.provider_id)
         return
+    if isinstance(action, str):
+        if action == "codex-proxy-url":
+            prompt_codex_proxy_url(stdscr)
+            return
     run_external_in_curses(stdscr, action())
 
 
@@ -1047,6 +1060,27 @@ def prompt_api_key(stdscr, pid: str) -> None:
         key = getpass.getpass("  OPENAI_API_KEY: ").strip()
         if key:
             subprocess.run(["codex", "login", "--with-api-key"], input=key + "\n", text=True)
+    print()
+    try:
+        input("  Enter para volver al harness...")
+    except EOFError:
+        pass
+    stdscr.refresh()
+
+
+def prompt_codex_proxy_url(stdscr) -> None:
+    curses.endwin()
+    print()
+    current = load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+    if current:
+        print(f"  Actual: {current}")
+    try:
+        url = input("  CLAUDE_HARNESS_CODEX_PROXY_URL (https://...workers.dev): ").strip()
+    except EOFError:
+        url = ""
+    if url:
+        save_env_values(HARNESS_ENV_FILE, {"CLAUDE_HARNESS_CODEX_PROXY_URL": url})
+        print("  Guardada.")
     print()
     try:
         input("  Enter para volver al harness...")
@@ -1545,6 +1579,17 @@ def pick_agent_slots(stdscr, provider, main_model) -> AgentSlots:
             return AgentSlots()
 
 
+def apply_provider_env(provider: ProviderDefinition) -> None:
+    if provider.provider_id == "codex":
+        env = load_env_file(HARNESS_ENV_FILE)
+        proxy = env.get("CLAUDE_HARNESS_CODEX_PROXY_URL", "").strip()
+        if proxy:
+            os.environ["CLAUDE_HARNESS_CODEX_PROXY_URL"] = proxy
+        no_refresh = env.get("CLAUDE_HARNESS_CODEX_NO_AUTO_REFRESH", "").strip()
+        if no_refresh:
+            os.environ["CLAUDE_HARNESS_CODEX_NO_AUTO_REFRESH"] = no_refresh
+
+
 def run_tui(stdscr, extra_args: list[str]) -> None:
     init_colors()
     try:
@@ -1583,6 +1628,7 @@ def run_tui(stdscr, extra_args: list[str]) -> None:
             os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
         if slots.haiku:
             os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
+        apply_provider_env(provider)
         args = [provider.launcher]
         cc_model = model_id_for_claude_code(model.model_id, provider.provider_id)
         if cc_model != "default":
@@ -1605,6 +1651,7 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
     if slots.haiku:
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
+    apply_provider_env(provider)
     args = [provider.launcher]
     cc_model = model_id_for_claude_code(model.model_id, provider.provider_id)
     if cc_model != "default":
