@@ -1,0 +1,20 @@
+name = "opencode-go-proxy"
+main = "src/index.js"
+compatibility_date = "2026-06-16"
+
+[vars]
+OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1"
+DEFAULT_MODEL = "minimax-m3"
+
+[observability]
+enabled = true
+logs = { enabled = true, invocation_logs = true }
+
+# Al primer deploy, ejecuta:
+#   cd worker/
+#   npx wrangler secret put OPENCODE_API_KEY  # solo si usas OpenCode Go mode
+#
+# Modos soportados:
+#   - OpenCode Go (default): usa OPENCODE_BASE_URL + OPENCODE_API_KEY
+#   - Codex: usa el access_token de ChatGPT que viene en el header Authorization
+#     (prefijo "codex:"), llama a chatgpt.com/backend-api/codex/responses
