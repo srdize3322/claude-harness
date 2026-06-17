@@ -34,10 +34,10 @@ test("detectCodexMode: rejects non-codex auth", () => {
 });
 
 test("parseCodexAuth: parses valid header", () => {
-  const result = parseCodexAuth("codex:eyJhbGciOiJSUzI1NiJ9.abc:b86f7cb8-e91b-452a-8630-3f869bccfff0");
+  const result = parseCodexAuth("codex:eyJhbGciOiJSUzI1NiJ9.abc:00000000-0000-4000-8000-000000000001");
   assert(result !== null);
   assert.equal(result.accessToken, "eyJhbGciOiJSUzI1NiJ9.abc");
-  assert.equal(result.accountId, "b86f7cb8-e91b-452a-8630-3f869bccfff0");
+  assert.equal(result.accountId, "00000000-0000-4000-8000-000000000001");
   // baseUrl is no longer in parseCodexAuth result; use resolveCodexBaseUrl instead
 });
 
@@ -52,7 +52,7 @@ test("parseCodexAuth: handles access tokens with colons (JWTs)", () => {
   // A real JWT has dots but no colons; the format is "codex:<jwt>:<uuid>".
   // The parser uses lastIndexOf(":") to find the boundary.
   const jwt = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE5MzQ0ZTY1LWIwNDQ0OTdkLWEwMDctNDQ2MS04NjExLTNkNzM3NTM2OTVkIn0.fakefake";
-  const accountId = "b86f7cb8-e91b-452a-8630-3f869bccfff0";
+  const accountId = "00000000-0000-4000-8000-000000000001";
   const result = parseCodexAuth(`codex:${jwt}:${accountId}`);
   assert(result !== null);
   assert.equal(result.accountId, accountId);
@@ -807,7 +807,7 @@ test("codexResponseToAnthropic: handles null input", () => {
 function makeRequest(body, options = {}) {
   const headers = {
     "Content-Type": "application/json",
-    Authorization: "codex:tok-abc:b86f7cb8-e91b-452a-8630-3f869bccfff0",
+    Authorization: "codex:tok-abc:00000000-0000-4000-8000-000000000001",
     ...(options.headers || {}),
   };
   return new Request("https://example.com/v1/messages", {
@@ -879,7 +879,7 @@ test("handleCodexMessages: streams SSE response", async () => {
     assert.equal(sent.include[0], "reasoning.encrypted_content");
     const reqHeaders = new Headers(m.calls[0].opts.headers);
     assert.equal(reqHeaders.get("Authorization"), "Bearer tok-abc");
-    assert.equal(reqHeaders.get("chatgpt-account-id"), "b86f7cb8-e91b-452a-8630-3f869bccfff0");
+    assert.equal(reqHeaders.get("chatgpt-account-id"), "00000000-0000-4000-8000-000000000001");
     assert.equal(reqHeaders.get("OpenAI-Beta"), "responses=experimental");
   } finally {
     m.restore();

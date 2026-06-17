@@ -182,6 +182,93 @@ claude-harness --refresh-catalog
 claude-harness --skip --model claude-sonnet-4-5
 ```
 
+## Codex (experimental)
+
+Codex usa el auth de ChatGPT (OAuth con device-link) en vez de una API
+key. El backend real (`chatgpt.com/backend-api/codex/responses`) **no es
+oficial**: OpenAI puede cambiarlo sin aviso. No lo uses en producción
+crítica.
+
+Para que ande necesitás:
+
+1. Tu propio Cloudflare Worker que traduzca Anthropic → Codex. El repo
+   trae uno (`worker/`) que ya soporta Codex mode.
+2. La CLI de Codex (solo para el login inicial y refresh).
+3. Un access_token de ChatGPT (se obtiene con `codex login --device-auth`).
+
+### Setup paso a paso
+
+**1. Instalar Codex CLI**
+
+```bash
+brew install codex
+# o seguí https://claude.com/download
+```
+
+**2. Login con device auth**
+
+```bash
+codex login --device-auth
+```
+
+Te abre el browser. Aceptás el device y el access_token queda en
+`~/.codex/auth.json` con permisos 600.
+
+**3. Verificar login**
+
+```bash
+codex login --status
+# debe decir "Logged in using ChatGPT"
+```
+
+**4. Deploy tu Worker**
+
+Mirá [`worker/README.md`](worker/README.md). El Worker acepta el
+access_token en el header `Authorization: codex:<token>:<account_id>` y
+rutea al backend de Codex. OpenCode Go y Codex mode coexisten en el
+mismo Worker — el modo se elige por el header.
+
+**5. Configurar el proxy URL**
+
+En `~/.config/claude-harness/.env`:
+
+```bash
+CLAUDE_HARNESS_CODEX_PROXY_URL=https://<tu-worker>.workers.dev
+```
+
+O desde la TUI: elegí Codex → `Ctrl+L` → "Set proxy URL".
+
+**6. Elegir modelo y lanzar**
+
+```bash
+claude-harness
+# → Codex → gpt-5.4
+```
+
+Modelos disponibles: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`,
+`gpt-5.3-codex-spark` (los que el backend de ChatGPT Plus/Pro acepta).
+
+### Refresh automático
+
+El wrapper `claude-codex` lee `~/.codex/auth.json`, decodifica el JWT y
+si vence en menos de 5 minutos hace un refresh automático contra
+`https://auth.openai.com/oauth/token`. Persiste atómicamente con
+`os.replace()` y mantiene los permisos 600. No necesitás re-loginear a
+mano cada vez.
+
+### Caveats
+
+- El endpoint `chatgpt.com/backend-api/codex/responses` es **no oficial**
+  y puede romperse sin aviso. Si pasa, hay que actualizar
+  `worker/src/codex-handler.js`.
+- El context window que muestra `/context` es aproximado — el backend
+  no reporta el real.
+- El token es tu cuenta personal de ChatGPT. Compartilo bajo tu
+  responsabilidad.
+- El modo `apikey` (`OPENAI_API_KEY` en `~/.codex/auth.json`) también
+  anda, pero pasa por la misma API no oficial — el modo "oficial" para
+  API key es Anthropic directo, no Codex.
+
 ## Key bindings de la TUI
 
 Dentro de la TUI, antes de abrir Claude Code:

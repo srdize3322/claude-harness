@@ -4,7 +4,7 @@
 # No necesita cuenta real de Codex.
 set -euo pipefail
 
-WRAPPER="/Users/santiago/claude-harness/scripts/claude-codex"
+WRAPPER="$(cd "$(dirname "$0")/../../scripts" && pwd)/claude-codex"
 TEST_HOME=$(mktemp -d)
 export HOME="$TEST_HOME"
 

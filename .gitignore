@@ -17,3 +17,9 @@ __pycache__/
 /tmp/
 /test/
 *.log
+
+# Node / Wrangler (Worker)
+node_modules/
+.wrangler/
+dist/
+
