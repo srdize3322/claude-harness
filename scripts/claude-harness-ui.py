@@ -197,6 +197,11 @@ def infer_provider_for_model(model_id: str | None) -> str | None:
     for prov_id in ALL_PROVIDER_IDS:
         if m.startswith(prov_id + "/"):
             return prov_id
+    # OpenRouter / OpenCode Go: only the prefixed form is routable
+    if m.startswith("opencode-go/"):
+        return "opencode-go"
+    if m.startswith("openrouter/"):
+        return "openrouter"
     # Anthropic native
     if m.startswith("claude-") or m.startswith("claude_"):
         return "claude"
@@ -596,14 +601,30 @@ def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None
                        provider_id: str | None = None) -> dict | None:
     if not catalog:
         return None
-    if provider_id:
-        cat_id = PROVIDER_TO_CATALOG_ID.get(provider_id, provider_id)
+    # Strip provider/ prefix (used in multi picker) for catalog lookup
+    bare = model_id.split("/")[-1] if model_id else ""
+    # Multi-provider: infer the actual provider from the prefix so we
+    # look up the model in the right catalog section.
+    lookup_provider_id = provider_id
+    if provider_id == "multi" and "/" in model_id:
+        prefix = model_id.split("/")[0]
+        # Map multi prefix to the right catalog id
+        prefix_map = {
+            "claude": "anthropic",
+            "codex": "openai",
+            "minimax": "minimax",
+            "openrouter": "openrouter",
+            "opencode-go": "opencode",
+        }
+        lookup_provider_id = prefix_map.get(prefix, prefix)
+    if lookup_provider_id:
+        cat_id = PROVIDER_TO_CATALOG_ID.get(lookup_provider_id, lookup_provider_id)
         prov_models = catalog.get(cat_id)
         if isinstance(prov_models, dict):
-            for cand in (model_id, model_id.split("/")[-1], model_id.lower(), model_id.split("/")[-1].lower()):
+            for cand in (model_id, bare, model_id.lower(), bare.lower()):
                 if cand in prov_models:
                     return prov_models[cand]
-    needle = model_id.split("/")[-1].lower()
+    needle = bare.lower()
     for prov_models in catalog.values():
         if not isinstance(prov_models, dict):
             continue
@@ -680,9 +701,12 @@ def is_anthropic_model(model_id: str | None, provider_id: str | None) -> bool:
         return ml.startswith("anthropic/") or "/claude-" in ml
     if provider_id == "multi" and model_id:
         # For multi-provider, the [1m] decision is based on the model
-        # itself (only Claude models get the suffix).
-        ml = model_id.lower()
-        return ml.startswith("claude-") or ml.startswith("claude_")
+        # itself (only Claude models get the suffix). Strip any
+        # provider/ prefix first.
+        bare = model_id.split("/")[-1].lower() if "/" in model_id else model_id.lower()
+        if bare.startswith("claude-") or bare.startswith("claude_"):
+            return True
+        return False
     return False
 
 
@@ -877,15 +901,54 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
     elif provider.provider_id == "opencode-go":
         models = OPENCODE_GO_MODELS
     elif provider.provider_id == "multi":
-        # Multi-provider: aggregate one representative model from each
-        # backend so the user has something to pick as the "main". The
-        # real configuration happens in the slot picker (where they can
-        # pick from any provider).
-        models = [
-            ModelItem("claude-opus-4-6", "claude-opus-4-6 (Anthropic)"),
-            ModelItem("gpt-5.4", "gpt-5.4 (Codex)"),
-            ModelItem("MiniMax-M3", "MiniMax-M3 (MiniMax)"),
-        ]
+        # Multi-provider: aggregate ALL models from ALL backends so the
+        # user can pick any model as the main. Models are prefixed with
+        # the provider so the smart proxy can route correctly.
+        models = []
+        seen = set()
+        # Use the models.dev catalog (single source of truth) for the
+        # model list. Fall back to per-provider fetchers only for
+        # backends not in the catalog.
+        catalog = fetch_models_dev_catalog(force=False)
+        provider_labels = {
+            "claude": "Anthropic",
+            "codex": "Codex",
+            "minimax": "MiniMax",
+            "openrouter": "OpenRouter",
+            "opencode-go": "OpenCode Go",
+        }
+        for prov_id, label in provider_labels.items():
+            cat_id = PROVIDER_TO_CATALOG_ID.get(prov_id, prov_id)
+            if catalog and cat_id in catalog:
+                prov_models = catalog[cat_id]
+            else:
+                prov_def = next((p for p in PROVIDERS if p.provider_id == prov_id), None)
+                if prov_def is None:
+                    continue
+                try:
+                    prov_models_list = fetch_models_for_provider(
+                        prov_def, force_refresh=force_refresh)
+                    prov_models = {m.model_id: {"limit": {}} for m in prov_models_list}
+                except Exception:
+                    continue
+            if not isinstance(prov_models, dict):
+                continue
+            for mid, info in prov_models.items():
+                if not isinstance(mid, str) or mid == "default" or mid in seen:
+                    continue
+                # Skip non-model entries
+                if not isinstance(info, dict):
+                    continue
+                seen.add(mid)
+                # Get display name from info if available
+                display = mid
+                if isinstance(info, dict):
+                    name = info.get("name") or info.get("display_name")
+                    if name:
+                        display = name
+                prefixed_id = f"{prov_id}/{mid}"
+                prefixed_label = f"[{label}] {display}"
+                models.append(ModelItem(prefixed_id, prefixed_label))
     else:
         models = [ModelItem("default", "Default")]
     models = enrich_models_with_reasoning(provider.provider_id, models)
