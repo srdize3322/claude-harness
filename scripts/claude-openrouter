@@ -72,7 +72,10 @@ declare -a launch_args
 launch_args=("$HOME/.local/bin/claude")
 
 if [ "$should_inject_default_model" = true ] && [ -n "${CLAUDE_HARNESS_OPENROUTER_MODEL:-}" ]; then
-  launch_args+=("--model" "$CLAUDE_HARNESS_OPENROUTER_MODEL")
+  # Remove the internal openrouter/ prefix if present so OpenRouter API accepts it
+  model="$CLAUDE_HARNESS_OPENROUTER_MODEL"
+  model="${model#openrouter/}"
+  launch_args+=("--model" "$model")
 fi
 
 exec "${launch_args[@]}" "$@"

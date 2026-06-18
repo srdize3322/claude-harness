@@ -158,7 +158,7 @@ fi
 # the OpenCode Go default model (lowercase, so the same prefix but
 # case-sensitive routing). The smart-proxy uses the same case-sensitive
 # heuristic.
-if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
+if [ -z "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ] && [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
   case "$main_model" in
     claude-*|anthropic/*) export CLAUDE_HARNESS_MAIN_BACKEND="anthropic" ;;
     gpt-*|codex-*|codex/*) export CLAUDE_HARNESS_MAIN_BACKEND="codex" ;;

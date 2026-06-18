@@ -569,6 +569,8 @@ def fetch_openrouter_models() -> list[ModelItem]:
         slug = str(entry.get("id", "")).strip()
         if not slug:
             continue
+        # Prepend openrouter/ so the smart proxy can uniquely identify OpenRouter models
+        slug = f"openrouter/{slug}"
         label = str(entry.get("name", slug)).strip() or slug
         ctx = entry.get("context_length")
         items.append(ModelItem(slug, label, context=ctx))
@@ -2783,11 +2785,6 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         next(p for p in PROVIDERS if p.provider_id == "multi")
         if is_multi else provider
     )
-    if is_multi:
-        for slot_name in ("opus", "sonnet", "haiku"):
-            val = getattr(slots, slot_name)
-            if val and "/" in val:
-                setattr(slots, slot_name, val.split("/", 1)[1])
     if not use_plain_defaults and slots.opus:
         os.environ["CLAUDE_HARNESS_SLOT_OPUS"] = slots.opus
     if not use_plain_defaults and slots.sonnet:
@@ -2796,6 +2793,9 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
     if not use_plain_defaults and effective_provider.provider_id == "multi":
         os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
+        # Tell claude-multi explicitly which backend the user picked as the main provider
+        # so it doesn't have to guess based on the model string.
+        os.environ["CLAUDE_HARNESS_MAIN_BACKEND"] = provider.provider_id
     apply_provider_env(effective_provider)
     args = [effective_provider.launcher]
     cc_model = model_id_for_claude_code(
