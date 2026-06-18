@@ -9,8 +9,8 @@
 │  ~/tu/proyecto                       │
 ╰──────────────────────────────────────╯
 ❯ /context
-   31.9k/460.8k tokens (7%)              ← context real del modelo (no fake 200k)
-   Auto-compact window: 460.8k tokens     ← threshold = 90% del real
+   31.9k/200.0k tokens (15%)             ← límite visual de la UI (bloqueado por el bypass)
+   Auto-compact window: 460.8k tokens     ← threshold = 90% del contexto real (funciona perfecto)
 ```
 
 ## Por qué
@@ -25,9 +25,8 @@ con el mismo flujo, los mismos slash commands, las mismas skills, los mismos MCP
 - **Catálogo Dinámico**: Extracción en tiempo real de 5000+ modelos via [models.dev](https://models.dev), con sus límites de contexto siempre actualizados.
 - **Per-agent model slots**: opus/sonnet/haiku configurables independientemente
 - **Thinking levels**: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`
-- **Auto-compact inteligente**: threshold al 90% del context real del modelo (no del fake 200k default de Claude Code)
-- **Display correcto en `/context`**: muestra el context window real aunque el modelo no sea nativo de Anthropic
-- **Sin tocar Claude Code**: el harness solo setea env vars estables; las updates de Anthropic no rompen nada
+- **Auto-compact inteligente**: threshold al 90% del context real del modelo, sin importar lo que muestre visualmente la UI (funciona en background).
+- **Sin tocar Claude Code**: el harness opera por proxy y variables de entorno; las updates de Anthropic no rompen nada.
 
 ## Instalación
 
@@ -384,41 +383,26 @@ de ese provider directo.
 `claude-harness` fue re-diseñado para no depender de listas de modelos estáticas (hardcodeadas). En su lugar, cuando abres la interfaz, el sistema lee el catálogo dinámico desde `models.dev` (mediante `fetch_catalog_models`) e inyecta la lista actualizada de modelos para proveedores como **MiniMax** u **OpenCode Go**. 
 Si el día de mañana un modelo cambia su límite de 200k a 512k tokens, la aplicación lo absorberá de forma transparente sin que tengas que tocar el código.
 
-## Cómo funciona (el truco del `[1m]`)
-
-## Cómo funciona (el truco del `[1m]`)
+## Cómo funciona el Context Management (Auto-compact & [1m] trick)
 
 Claude Code internamente tiene una lista hardcodeada de modelos con sus context windows.
-Para modelos no-Anthropic, devuelve 200k como default (incorrecto para M3 que tiene 512k).
+Para modelos no-Anthropic, asume 200k por default.
 
-**El truco**: Claude Code tiene un detector `Jf(H)` que matchea `/\[1m\]/i` en el model name
-y trata al modelo como 1M context. Y tiene `aO(H)` que **strippea el `[1m]` antes de mandar
-a la API**:
+**El truco heredado (`[1m]`)**: Históricamente, pasábamos `--model CustomModel[1m]` para forzar a la interfaz de Claude a mostrar 1 Millón de tokens (usando su regex interno `Jf(H)` que matchea `/[1m]/i`). 
 
-```js
-function aO(H){ return H.replace(/\[(1|2)m\]/gi, "") }
-```
+**Limitación actual (Bypass de validación)**: Debido a las estrictas validaciones de arranque agregadas en las versiones recientes de Claude Code, ya no podemos pasar modelos customizados con sufijos directamente (revisar la sección *Arquitectura Interna*). Por lo tanto, el UI de `/context` siempre te mostrará **200k** de límite visual al usar modelos de OpenRouter o MiniMax.
 
-El harness explota esto:
+¡Pero no te preocupes! Aunque la UI muestre 200k, el **Auto-compact inteligente** sí funciona a la perfección en background.
 
-1. Detecta si el modelo NO es Anthropic.
-2. Le agrega `[1m]` al `--model` flag que va a Claude Code → display muestra 1M.
-3. **Smart Proxy Interceptor**: Nuestro `smart-proxy.py` local intercepta las llamadas, remueve el sufijo `[1m]` del payload JSON transparente y fuerza `Accept-Encoding: identity` (removiendo el GZIP) para garantizar que los subagentes (como el parser JSON de Anthropic) no crasheen con respuestas binarias o comprimidas.
-4. Setea `AUTO_COMPACT_WINDOW = real_ctx * 0.9` (90% del real).
-
-Resultado:
-- M3 (512k real): display 1M, threshold 460k, auto-compact a tiempo
-- M2.5 (204k real): display 1M, threshold 184k, auto-compact a tiempo
-- Claude Sonnet 4 (200k real): display 200k, threshold 180k, auto-compact normal
+1. `claude-harness` calcula el context window real (ej. 512k para M3).
+2. Setea la variable interna `CLAUDE_CODE_AUTO_COMPACT_WINDOW = int(real_ctx * 0.9)`.
+3. Claude Code respeta esta variable, permitiendo que acumules 460k tokens de contexto sin compactar, ¡aunque su UI diga que el máximo es 200k!
 
 ### Por qué no se rompe con updates de Claude Code
 
-El harness solo usa:
-- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (env var estable, ya documentada)
-- `[1m]` (feature nativo de Claude Code: `Jf` y `aO`)
-
-Si Anthropic remueve el soporte `[1m]` en una versión futura, el display vuelve a 200k
-pero el threshold de auto-compact sigue funcionando correctamente. No rompemos nada.
+El harness descansa sobre configuraciones oficiales (variables de entorno):
+- `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (env var estable, ya documentada).
+- El proxy ruteador (`smart-proxy.py`) opera en la capa de red interceptando la API, no alterando el código fuente ofuscado de Claude Code.
 
 ## Auto-compact inteligente
 
@@ -446,12 +430,12 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### `/context` muestra 200k en vez del real
+### `/context` muestra 200k aunque mi modelo tiene más capacidad
 
-El truco `[1m]` no se aplicó. Posibles causas:
-1. Tu versión de Claude Code no soporta `[1m]` (muy vieja, < 2.1.0)
-2. Estás usando Claude nativo (Anthropic), que ya conoce su context → correcto
-3. El provider es OpenRouter con modelo `anthropic/*` → detectado como Anthropic → correcto
+Esto es completamente **normal y esperado** en las versiones recientes de `claude-harness`.
+Debido a la estricta validación de arranque de Claude Code (ver sección *Arquitectura Interna*), la UI de Claude Code cree que estás usando un modelo `sonnet` estándar de Anthropic con límite de 200k tokens.
+
+Sin embargo, el **auto-compact inteligente en background** sigue funcionando con el límite real del modelo. Puedes comprobarlo verificando la línea `Auto-compact window: X tokens` cuando ejecutas `/context`. Ese valor `X` sí reflejará la verdadera capacidad de tu modelo.
 
 ### El auto-compact no dispara
 
