@@ -241,8 +241,15 @@ def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str
     # Always inject our own auth; ignore whatever the client sent.
     if auth["type"] == "oauth":
         h["Authorization"] = f"Bearer {auth['access_token']}"
+        h.pop("x-api-key", None)
+        # OAuth requires the oauth-2025-04-20 beta header
+        beta = h.get("anthropic-beta", "")
+        if "oauth" not in beta:
+            h["anthropic-beta"] = f"{beta},oauth-2025-04-20" if beta else "oauth-2025-04-20"
     elif auth["type"] == "token":
-        h["Authorization"] = f"Bearer {auth['token']}"
+        h["x-api-key"] = auth["token"]
+        h.pop("Authorization", None)
+        
     h["User-Agent"] = DEFAULT_BROWSER_UA
     h.pop("host", None)
     h.pop("content-length", None)
@@ -382,10 +389,22 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
 
         try:
             if backend == "anthropic":
-                auth = load_anthropic_auth()
-                if not auth:
-                    return self._error(401, "Anthropic auth not available", "authentication_error")
-                url, h, data = _build_anthropic_request(body, in_headers, auth)
+                # If Claude Code sent native auth, pass it through transparently.
+                client_auth = in_headers.get("authorization", "")
+                client_api_key = in_headers.get("x-api-key", "")
+                is_dummy = "smart-proxy-passthrough" in client_auth or "smart-proxy-passthrough" in client_api_key
+                
+                if not is_dummy and (client_auth or client_api_key):
+                    url = ANTHROPIC_API_BASE + "/v1/messages"
+                    h = dict(in_headers)
+                    if "anthropic-version" not in h:
+                        h["anthropic-version"] = ANTHROPIC_VERSION
+                    data = json.dumps(body).encode("utf-8")
+                else:
+                    auth = load_anthropic_auth()
+                    if not auth:
+                        return self._error(401, "Anthropic auth not available", "authentication_error")
+                    url, h, data = _build_anthropic_request(body, in_headers, auth)
             elif backend == "codex":
                 codex_auth = load_codex_auth()
                 if not codex_auth or not codex_auth.get("access_token"):

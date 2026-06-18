@@ -125,10 +125,17 @@ ensure_codex_proxy_if_needed
 
 # Configure environment for Claude Code
 export ANTHROPIC_BASE_URL="http://${SMART_HOST}:${SMART_PORT}"
-# ANTHROPIC_AUTH_TOKEN is required by Claude Code but the smart proxy
-# ignores it (uses its own per-backend auth).
-export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-smart-proxy-passthrough}"
-unset ANTHROPIC_API_KEY
+
+if auth_ok anthropic; then
+  # User has native Anthropic auth (OAuth or API Token).
+  # Do not override ANTHROPIC_AUTH_TOKEN so Claude uses its native logic.
+  unset ANTHROPIC_API_KEY
+else
+  # User lacks Anthropic auth. Force dummy token so Claude Code doesn't crash on startup.
+  # The smart-proxy will handle backend auth injection if needed.
+  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-smart-proxy-passthrough}"
+  unset ANTHROPIC_API_KEY
+fi
 
 # Pass the main model
 if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
