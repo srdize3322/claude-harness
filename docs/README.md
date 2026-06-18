@@ -198,6 +198,23 @@ Para que ande necesitás:
 
 ### Setup paso a paso
 
+## Arquitectura Interna (Bypass de Validación)
+
+Claude Code tiene una validación estricta (hardcoded) al inicio de la aplicación: si le pasas un flag `--model` con un nombre de modelo que no empieza con `claude-` o no es un alias reconocido (`opus`, `sonnet`, `haiku`), **rechaza arrancar inmediatamente**. Ni siquiera hace un request de red para validar; simplemente falla localmente.
+
+Para habilitar modelos de otros providers como `minimax/abab6.5-chat` o `openrouter/gpt-4o`, `claude-harness` implementa un bypass de dos capas:
+
+1. **El Señuelo (TUI Injector)**:
+   Si seleccionas un modelo que no es nativo de Anthropic en la TUI, el wrapper `claude-harness-ui.py` no se lo pasa a Claude Code. En su lugar, le inyecta un modelo señuelo (`--model sonnet`) para que pase la validación de arranque sin problemas. Simultáneamente, exporta el modelo real en la variable de entorno secreta `CLAUDE_HARNESS_REAL_MAIN_MODEL`.
+
+2. **El Intercambio (Smart Proxy)**:
+   Cuando Claude Code inicia, cree que está usando `sonnet` y manda payloads JSON con `"model": "claude-3-5-sonnet-20241022"` a nuestro `smart-proxy.py`. El proxy detecta que este payload coincide con el modelo señuelo, borra `"claude-3-5-sonnet-20241022"`, y lo reemplaza "al vuelo" con tu modelo real (`minimax/abab6.5-chat`). Luego extrae el provider (`minimax`), procesa el alias, y rutea la conexión al backend correcto.
+
+**Manejo de Subagentes**: 
+Claude Code **no valida** los nombres de los modelos de los subagentes al arrancar (los slots `opus`, `sonnet`, `haiku` mapeados en herramientas internas). Por lo tanto, el proxy deja que esos modelos pasen sin aplicar el reemplazo del modelo principal, garantizando que el ruteo hacia múltiples providers en una sola sesión (ej. Opus de Main, Minimax de Subagente) funcione a la perfección. Además, `smart-proxy.py` imprime los ruteos de todas las peticiones a `stderr` (visible en `/tmp/claude-harness-smart-proxy.log`), permitiendo observar exactamente qué modelo y proveedor fue contactado sin alterar la ejecución nativa.
+
+## Troubleshooting
+
 **1. Instalar Codex CLI**
 
 ```bash
