@@ -466,6 +466,9 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         if backend == "main":
             backend = main_backend or "anthropic"
 
+        sys.stderr.write(f"[smart-proxy] Routing request for '{model}' (original) -> '{clean_model}' to backend '{backend}'\n")
+        sys.stderr.flush()
+
         # Pass through request headers but force uncompressed response
         in_headers = {k.lower(): v for k, v in self.headers.items()
                       if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
