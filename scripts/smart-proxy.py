@@ -240,8 +240,11 @@ def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str
     h["anthropic-version"] = ANTHROPIC_VERSION
     # Always inject our own auth; ignore whatever the client sent.
     if auth["type"] == "oauth":
-        h["Authorization"] = f"Bearer {auth['access_token']}"
+        h["Cookie"] = f"sessionKey={auth['access_token']}"
+        h.pop("Authorization", None)
         h.pop("x-api-key", None)
+        h.pop("sessionkey", None)
+        h.pop("Sessionkey", None)
         # OAuth requires the oauth-2025-04-20 beta header
         beta = h.get("anthropic-beta", "")
         if "oauth" not in beta:
