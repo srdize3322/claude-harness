@@ -188,6 +188,7 @@ def detect_backend(model: str) -> tuple[str, str]:
     # Explicit provider prefix wins
     prefix_map = {
         "anthropic/": "anthropic",
+        "claude/": "anthropic",
         "codex/": "codex",
         "minimax/": "minimax",
         "openrouter/": "openrouter",

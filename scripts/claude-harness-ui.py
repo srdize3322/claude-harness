@@ -2805,17 +2805,26 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         model.model_id, effective_provider.provider_id, catalog)
     if not use_plain_defaults and cc_model != "default":
         # Check if the model is a standard Anthropic model that Claude Code natively accepts
-        base_model = cc_model.split("[")[0] # remove [1m] suffix for check
-        is_standard = base_model in ("opus", "sonnet", "haiku", "fable") or base_model.startswith("claude-")
+        base_model = cc_model.split("[")[0]
+        # Strip provider prefix for standard check (e.g., claude/opus -> opus)
+        check_model = base_model.split("/")[-1] if "/" in base_model else base_model
+        is_standard = check_model in ("opus", "sonnet", "haiku", "fable") or check_model.startswith("claude-")
         
         if is_standard and "/" not in base_model:
             args.extend(["--model", cc_model])
+        elif is_standard and "/" in base_model:
+            # If it's a standard model with a prefix like claude/opus, pass the un-prefixed name
+            args.extend(["--model", check_model])
         else:
             # Tell Claude Code we're using 'sonnet' so it doesn't crash on startup validation
             args.extend(["--model", "sonnet"])
-            # But tell the proxy to intercept the primary model requests and use our real model
-            os.environ["CLAUDE_HARNESS_REAL_MAIN_MODEL"] = cc_model
-            os.environ["CLAUDE_HARNESS_DUMMY_MAIN_MODEL"] = "claude-3-5-sonnet-20241022"
+            # If the user overrode the sonnet slot, Claude Code will send that override instead of sonnet
+            # So the dummy model must be the overridden model
+            dummy_model = os.environ.get("CLAUDE_HARNESS_SLOT_SONNET")
+            if not dummy_model:
+                dummy_model = "claude-3-5-sonnet-20241022"
+            os.environ["CLAUDE_HARNESS_REAL_MAIN_MODEL"] = base_model
+            os.environ["CLAUDE_HARNESS_DUMMY_MAIN_MODEL"] = dummy_model
     args.extend(permission.args)
     args.extend(extra_args)
     os.execv(args[0], args)

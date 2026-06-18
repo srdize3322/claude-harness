@@ -179,5 +179,5 @@ export CLAUDE_HARNESS_CODEX_PROXY_URL="http://127.0.0.1:${CODEX_PORT}"
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
 export API_TIMEOUT_MS="${API_TIMEOUT_MS:-3000000}"
 
-log "Lanzando Claude Code..."
+log "Lanzando Claude Code con argumentos: $*"
 exec claude "$@"
