@@ -274,6 +274,11 @@ def _build_passthrough_request(base: str, body: dict, headers: dict,
     url = base.rstrip("/") + "/v1/messages"
     h = dict(headers)
     h["Authorization"] = auth_header
+    # Pop Anthropic-specific auth headers to avoid leaking tokens
+    h.pop("x-api-key", None)
+    h.pop("sessionkey", None)
+    h.pop("Sessionkey", None)
+    
     # Always set a browser-like User-Agent (overrides any client UA).
     h["User-Agent"] = DEFAULT_BROWSER_UA
     h.pop("host", None)
@@ -294,6 +299,11 @@ def _build_codex_request(body: dict, headers: dict,
     h.pop("anthropic-version", None)
     h.pop("host", None)
     h.pop("content-length", None)
+    # Pop Anthropic-specific auth headers to avoid leaking tokens
+    h.pop("x-api-key", None)
+    h.pop("sessionkey", None)
+    h.pop("Sessionkey", None)
+    
     h["User-Agent"] = DEFAULT_BROWSER_UA
     if codex_auth.get("access_token") and codex_auth.get("account_id"):
         h["Authorization"] = (
