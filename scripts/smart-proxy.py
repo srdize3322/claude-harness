@@ -431,8 +431,24 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
             return self._error(400, "Invalid JSON body", "invalid_request_error")
 
         model = body.get("model", "")
+        
+        # Override primary model if the UI wrapper injected a dummy to bypass Claude Code's startup checks
+        real_main = os.environ.get("CLAUDE_HARNESS_REAL_MAIN_MODEL")
+        dummy_main = os.environ.get("CLAUDE_HARNESS_DUMMY_MAIN_MODEL")
+        if real_main and dummy_main and model == dummy_main:
+            model = real_main
+
         backend, clean_model = detect_backend(model)
-        if clean_model and clean_model != model:
+        
+        # Claude Code natively resolves aliases like "opus" to "claude-3-opus-20240229", but for 
+        # subagent slots or multi-provider prefixes (e.g. "claude/opus"), we must resolve them here.
+        if backend in ("anthropic", "main"):
+            if clean_model == "opus": clean_model = "claude-3-opus-20240229"
+            elif clean_model == "sonnet": clean_model = "claude-3-5-sonnet-20241022"
+            elif clean_model == "haiku": clean_model = "claude-3-5-haiku-20241022"
+            elif clean_model == "fable": clean_model = "claude-fable-20250219"
+
+        if clean_model and clean_model != body.get("model", ""):
             body = dict(body)
             body["model"] = clean_model
 

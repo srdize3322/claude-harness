@@ -2804,7 +2804,18 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
     cc_model = model_id_for_claude_code(
         model.model_id, effective_provider.provider_id, catalog)
     if not use_plain_defaults and cc_model != "default":
-        args.extend(["--model", cc_model])
+        # Check if the model is a standard Anthropic model that Claude Code natively accepts
+        base_model = cc_model.split("[")[0] # remove [1m] suffix for check
+        is_standard = base_model in ("opus", "sonnet", "haiku", "fable") or base_model.startswith("claude-")
+        
+        if is_standard and "/" not in base_model:
+            args.extend(["--model", cc_model])
+        else:
+            # Tell Claude Code we're using 'sonnet' so it doesn't crash on startup validation
+            args.extend(["--model", "sonnet"])
+            # But tell the proxy to intercept the primary model requests and use our real model
+            os.environ["CLAUDE_HARNESS_REAL_MAIN_MODEL"] = cc_model
+            os.environ["CLAUDE_HARNESS_DUMMY_MAIN_MODEL"] = "claude-3-5-sonnet-20241022"
     args.extend(permission.args)
     args.extend(extra_args)
     os.execv(args[0], args)
