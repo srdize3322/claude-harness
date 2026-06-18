@@ -387,8 +387,17 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
             body = dict(body)
             body["model"] = clean_model
 
-        # Resolve actual backend
-        main_backend = os.environ.get("CLAUDE_HARNESS_MAIN_BACKEND", "").strip()
+        # Resolve actual backend dynamically
+        main_backend = ""
+        try:
+            with open("/tmp/claude-harness-main-backend.txt", "r") as f:
+                main_backend = f.read().strip()
+        except FileNotFoundError:
+            pass
+        
+        if not main_backend:
+            main_backend = os.environ.get("CLAUDE_HARNESS_MAIN_BACKEND", "").strip()
+
         if backend == "main":
             backend = main_backend or "anthropic"
 

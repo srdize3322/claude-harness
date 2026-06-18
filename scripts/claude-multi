@@ -168,6 +168,10 @@ if [ -z "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ] && [ -n "$main_model" ] && [ "$main
   esac
 fi
 
+if [ -n "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ]; then
+  echo "$CLAUDE_HARNESS_MAIN_BACKEND" > /tmp/claude-harness-main-backend.txt
+fi
+
 # Tell the Codex proxy (if running) the upstream URL
 export CLAUDE_HARNESS_CODEX_PROXY_URL="http://127.0.0.1:${CODEX_PORT}"
 
