@@ -402,9 +402,17 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
                 # If Claude Code sent native auth, pass it through transparently.
                 client_auth = in_headers.get("authorization", "")
                 client_api_key = in_headers.get("x-api-key", "")
-                is_dummy = "smart-proxy-passthrough" in client_auth or "smart-proxy-passthrough" in client_api_key
+                client_session = in_headers.get("sessionkey", "")
+                client_cookie = in_headers.get("cookie", "")
                 
-                if not is_dummy and (client_auth or client_api_key):
+                is_dummy = ("smart-proxy-passthrough" in client_auth or 
+                            "smart-proxy-passthrough" in client_api_key or
+                            "smart-proxy-passthrough" in client_session or
+                            "smart-proxy-passthrough" in client_cookie)
+                
+                has_auth = bool(client_auth or client_api_key or client_session or "sessionKey=" in client_cookie)
+                
+                if not is_dummy and has_auth:
                     url = ANTHROPIC_API_BASE + "/v1/messages"
                     h = dict(in_headers)
                     if "anthropic-version" not in h:

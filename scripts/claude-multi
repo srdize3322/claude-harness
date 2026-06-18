@@ -36,7 +36,7 @@ command -v claude >/dev/null || die "claude (Claude Code) no instalado"
 # Auto-start codex-proxy if any slot needs Codex
 need_codex_proxy() {
   local m
-  for var in CLAUDE_HARNESS_SLOT_OPUS CLAUDE_HARNESS_SLOT_SONNET CLAUDE_HARNESS_SLOT_HAIKU; do
+  for var in CLAUDE_HARNESS_SLOT_MAIN CLAUDE_HARNESS_SLOT_OPUS CLAUDE_HARNESS_SLOT_SONNET CLAUDE_HARNESS_SLOT_HAIKU; do
     m="${!var:-}"
     case "$m" in
       gpt-*|codex-*|codex/*|o1*|o3*|o4*) return 0 ;;
