@@ -241,17 +241,16 @@ def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str
     # Always inject our own auth; ignore whatever the client sent.
     if auth["type"] == "oauth":
         h["Cookie"] = f"sessionKey={auth['access_token']}"
-        h.pop("Authorization", None)
+        h.pop("authorization", None)
         h.pop("x-api-key", None)
         h.pop("sessionkey", None)
-        h.pop("Sessionkey", None)
         # OAuth requires the oauth-2025-04-20 beta header
         beta = h.get("anthropic-beta", "")
         if "oauth" not in beta:
             h["anthropic-beta"] = f"{beta},oauth-2025-04-20" if beta else "oauth-2025-04-20"
     elif auth["type"] == "token":
         h["x-api-key"] = auth["token"]
-        h.pop("Authorization", None)
+        h.pop("authorization", None)
         
     h["User-Agent"] = DEFAULT_BROWSER_UA
     h.pop("host", None)
@@ -280,7 +279,7 @@ def _build_passthrough_request(base: str, body: dict, headers: dict,
     # Pop Anthropic-specific auth headers to avoid leaking tokens
     h.pop("x-api-key", None)
     h.pop("sessionkey", None)
-    h.pop("Sessionkey", None)
+    h.pop("sessionkey", None)
     
     # Always set a browser-like User-Agent (overrides any client UA).
     h["User-Agent"] = DEFAULT_BROWSER_UA
@@ -405,9 +404,9 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
             backend = main_backend or "anthropic"
 
         # Pass through request headers but force uncompressed response
-        in_headers = {k: v for k, v in self.headers.items()
+        in_headers = {k.lower(): v for k, v in self.headers.items()
                       if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
-        in_headers["Accept-Encoding"] = "identity"
+        in_headers["accept-encoding"] = "identity"
 
         try:
             if backend == "anthropic":
