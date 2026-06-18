@@ -127,13 +127,17 @@ ensure_codex_proxy_if_needed
 export ANTHROPIC_BASE_URL="http://${SMART_HOST}:${SMART_PORT}"
 
 if auth_ok anthropic; then
-  # User has native Anthropic auth (OAuth or API Token).
-  # Do not override ANTHROPIC_AUTH_TOKEN so Claude uses its native logic.
+  # User has native Anthropic auth (OAuth or API Token). The smart-proxy will
+  # load its own auth from ~/.claude/.credentials.json (or ANTHROPIC_AUTH_TOKEN
+  # if set). Clearing both env vars here prevents a stale token in the shell
+  # from overriding the proxy's preferred auth source.
   unset ANTHROPIC_API_KEY
+  unset ANTHROPIC_AUTH_TOKEN
 else
-  # User lacks Anthropic auth. Force dummy token so Claude Code doesn't crash on startup.
-  # The smart-proxy will handle backend auth injection if needed.
-  export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-smart-proxy-passthrough}"
+  # User lacks Anthropic auth. Force dummy token so Claude Code doesn't crash
+  # on startup. Force the value (no parameter expansion) so a stale env var
+  # cannot leak through.
+  export ANTHROPIC_AUTH_TOKEN="smart-proxy-passthrough"
   unset ANTHROPIC_API_KEY
 fi
 
@@ -160,12 +164,18 @@ fi
 # heuristic.
 if [ -z "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ] && [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
   case "$main_model" in
-    claude-*|anthropic/*) export CLAUDE_HARNESS_MAIN_BACKEND="anthropic" ;;
+    claude-*|claude/*|anthropic/*) export CLAUDE_HARNESS_MAIN_BACKEND="anthropic" ;;
     gpt-*|codex-*|codex/*) export CLAUDE_HARNESS_MAIN_BACKEND="codex" ;;
     MiniMax-*|minimax/*) export CLAUDE_HARNESS_MAIN_BACKEND="minimax" ;;
     openrouter/*) export CLAUDE_HARNESS_MAIN_BACKEND="openrouter" ;;
     opencode-go/*|minimax-*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
   esac
+fi
+
+# Defense-in-depth: even if the UI set MAIN_BACKEND="claude" (the provider id),
+# the proxy only knows "anthropic". Normalize before writing to disk.
+if [ "${CLAUDE_HARNESS_MAIN_BACKEND:-}" = "claude" ]; then
+  export CLAUDE_HARNESS_MAIN_BACKEND="anthropic"
 fi
 
 if [ -n "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ]; then

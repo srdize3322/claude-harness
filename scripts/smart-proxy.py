@@ -241,11 +241,13 @@ def _build_anthropic_request(body: dict, headers: dict, auth: dict) -> tuple[str
     h["anthropic-version"] = ANTHROPIC_VERSION
     # Always inject our own auth; ignore whatever the client sent.
     if auth["type"] == "oauth":
-        h["Cookie"] = f"sessionKey={auth['access_token']}"
-        h.pop("authorization", None)
+        # OAuth access tokens (sk-ant-oat01-...) go in the Authorization: Bearer
+        # header for /v1/messages — the cookie sessionKey form only works against
+        # claude.ai web routes, not the public API.
+        h["Authorization"] = f"Bearer {auth['access_token']}"
         h.pop("x-api-key", None)
         h.pop("sessionkey", None)
-        # OAuth requires the oauth-2025-04-20 beta header
+        h.pop("cookie", None)
         beta = h.get("anthropic-beta", "")
         if "oauth" not in beta:
             h["anthropic-beta"] = f"{beta},oauth-2025-04-20" if beta else "oauth-2025-04-20"
@@ -441,13 +443,16 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
 
         backend, clean_model = detect_backend(model)
         
-        # Claude Code natively resolves aliases like "opus" to "claude-3-opus-20240229", but for 
-        # subagent slots or multi-provider prefixes (e.g. "claude/opus"), we must resolve them here.
+        # Claude Code natively resolves aliases like "opus" to the latest 4.x model,
+        # but subagent slots and multi-provider prefixes (e.g. "claude/opus") arrive
+        # here unresolved. Keep these in sync with Claude Code's catalog — pinning
+        # to a discontinued snapshot (the old "claude-3-opus-20240229") yields a
+        # 404 not_found_error from the API.
         if backend in ("anthropic", "main"):
-            if clean_model == "opus": clean_model = "claude-3-opus-20240229"
-            elif clean_model == "sonnet": clean_model = "claude-3-5-sonnet-20241022"
-            elif clean_model == "haiku": clean_model = "claude-3-5-haiku-20241022"
-            elif clean_model == "fable": clean_model = "claude-fable-20250219"
+            if clean_model == "opus": clean_model = "claude-opus-4-8"
+            elif clean_model == "sonnet": clean_model = "claude-sonnet-4-6"
+            elif clean_model == "haiku": clean_model = "claude-haiku-4-5-20251001"
+            elif clean_model == "fable": clean_model = "claude-fable-5"
 
         if clean_model and clean_model != body.get("model", ""):
             body = dict(body)
@@ -477,26 +482,47 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
 
         try:
             if backend == "anthropic":
-                # If Claude Code sent native auth, pass it through transparently.
+                # Prefer passthrough of whatever auth Claude Code is using right now —
+                # it refreshes OAuth tokens internally before each request, so the
+                # creds in ~/.claude/.credentials.json on disk may already be stale.
+                # We only fall back to proxy-loaded auth when the client did not send
+                # anything usable (e.g. running with the smart-proxy-passthrough dummy).
                 client_auth = in_headers.get("authorization", "")
                 client_api_key = in_headers.get("x-api-key", "")
-                client_session = in_headers.get("sessionkey", "")
                 client_cookie = in_headers.get("cookie", "")
-                
-                is_dummy = ("smart-proxy-passthrough" in client_auth or 
-                            "smart-proxy-passthrough" in client_api_key or
-                            "smart-proxy-passthrough" in client_session or
-                            "smart-proxy-passthrough" in client_cookie)
-                
-                has_auth = bool(client_auth or client_api_key or client_session or "sessionKey=" in client_cookie)
-                
-                if not is_dummy and has_auth:
+
+                is_dummy = (
+                    "smart-proxy-passthrough" in client_auth or
+                    "smart-proxy-passthrough" in client_api_key or
+                    "smart-proxy-passthrough" in client_cookie
+                )
+                has_real_client_auth = bool(
+                    (client_auth and "smart-proxy-passthrough" not in client_auth) or
+                    (client_api_key and "smart-proxy-passthrough" not in client_api_key) or
+                    "sessionKey=" in client_cookie
+                )
+
+                if has_real_client_auth and not is_dummy:
+                    # Path A: passthrough. Trust the client's auth, but guarantee the
+                    # OAuth beta header when the client is using OAuth (it's mandatory
+                    # for /v1/messages and Claude Code does not always set it itself).
                     url = ANTHROPIC_API_BASE + "/v1/messages"
                     h = dict(in_headers)
-                    if "anthropic-version" not in h:
-                        h["anthropic-version"] = ANTHROPIC_VERSION
+                    h.setdefault("anthropic-version", ANTHROPIC_VERSION)
+                    using_oauth = (
+                        "sessionKey=" in client_cookie or
+                        client_auth.lower().startswith("bearer ")
+                    )
+                    if using_oauth:
+                        beta = h.get("anthropic-beta", "")
+                        if "oauth" not in beta:
+                            h["anthropic-beta"] = f"{beta},oauth-2025-04-20" if beta else "oauth-2025-04-20"
+                    h["User-Agent"] = DEFAULT_BROWSER_UA
+                    h.pop("host", None)
+                    h.pop("content-length", None)
                     data = json.dumps(body).encode("utf-8")
                 else:
+                    # Path B: client has no usable auth (or is the dummy). Use proxy auth.
                     auth = load_anthropic_auth()
                     if not auth:
                         return self._error(401, "Anthropic auth not available", "authentication_error")

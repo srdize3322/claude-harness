@@ -2796,7 +2796,9 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         # Tell claude-multi explicitly which backend the user picked as the main provider
         # so it doesn't have to guess based on the model string.
         main_backend = provider.provider_id
-        if main_backend == "multi":
+        # The "claude" provider id corresponds to the native Anthropic backend; the
+        # smart-proxy only knows "anthropic|codex|minimax|openrouter|opencode-go".
+        if main_backend in ("multi", "claude"):
             main_backend = "anthropic"
         os.environ["CLAUDE_HARNESS_MAIN_BACKEND"] = main_backend
     apply_provider_env(effective_provider)
