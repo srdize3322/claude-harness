@@ -2795,7 +2795,10 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
         # Tell claude-multi explicitly which backend the user picked as the main provider
         # so it doesn't have to guess based on the model string.
-        os.environ["CLAUDE_HARNESS_MAIN_BACKEND"] = provider.provider_id
+        main_backend = provider.provider_id
+        if main_backend == "multi":
+            main_backend = "anthropic"
+        os.environ["CLAUDE_HARNESS_MAIN_BACKEND"] = main_backend
     apply_provider_env(effective_provider)
     args = [effective_provider.launcher]
     cc_model = model_id_for_claude_code(
