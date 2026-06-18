@@ -341,6 +341,53 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
                 },
             })
             return
+            
+        if self.path.startswith("/v1/models"):
+            # Mock /v1/models so Claude Code accepts our custom model strings (e.g. "claude/opus")
+            model_id = self.path.split("/")[-1]
+            if model_id == "models" or not model_id:
+                # Provide a generic response with the current model plus common ones
+                main_model = os.environ.get("CLAUDE_HARNESS_CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+                self._json(200, {
+                    "data": [
+                        {
+                            "type": "model",
+                            "id": main_model,
+                            "display_name": main_model,
+                            "created_at": "2024-01-01T00:00:00Z"
+                        },
+                        {
+                            "type": "model",
+                            "id": "claude/opus",
+                            "display_name": "Opus",
+                            "created_at": "2024-01-01T00:00:00Z"
+                        },
+                        {
+                            "type": "model",
+                            "id": "claude/sonnet",
+                            "display_name": "Sonnet",
+                            "created_at": "2024-01-01T00:00:00Z"
+                        },
+                        {
+                            "type": "model",
+                            "id": "claude/haiku",
+                            "display_name": "Haiku",
+                            "created_at": "2024-01-01T00:00:00Z"
+                        }
+                    ],
+                    "has_more": False,
+                    "first_id": main_model,
+                    "last_id": main_model
+                })
+            else:
+                self._json(200, {
+                    "type": "model",
+                    "id": model_id,
+                    "display_name": model_id,
+                    "created_at": "2024-01-01T00:00:00Z"
+                })
+            return
+
         self.send_error(404, "Not Found")
 
     def do_POST(self):
