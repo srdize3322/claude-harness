@@ -488,7 +488,37 @@ python3 -c "import ast; ast.parse(open('scripts/claude-harness-ui.py').read())"
 bash scripts/test-codex-proxy.sh       # 16 tests: codex proxy
 bash worker/test/test-claude-codex.sh  # 25 tests: codex wrapper
 bash scripts/test-smart-proxy.sh      # tests: smart proxy + multi-provider
+bash scripts/test-multi.sh all         # 6 escenarios end-to-end via claude-multi
 ```
+
+### Test environment (`test-multi.sh`)
+
+Cada escenario arranca `claude-multi --print "<prompt>"` con env preseteado,
+captura el log del proxy en `/tmp/test-multi/<caso>/smart-proxy.log`, y
+reporta PASS/FAIL contra el routing esperado:
+
+```bash
+bash scripts/test-multi.sh list          # lista de casos
+bash scripts/test-multi.sh anthropic-puro
+bash scripts/test-multi.sh opus+minimax-slots   # caso real: Anthropic main + MiniMax slots
+bash scripts/test-multi.sh all                  # corre los 6
+```
+
+Casos cubiertos: `anthropic-puro`, `opus+minimax-slots`,
+`opus+opencodego-slots`, `multi-claude-opus`, `multi-anthropic-opus`,
+`multi-mixed`.
+
+## Cambios recientes
+
+Ver [CHANGELOG.md](CHANGELOG.md) para el detalle por release.
+
+Junio 2026 — fixes mayores al case "Anthropic OAuth principal + slots
+externos" en multi-provider: prefix `claude/` re-incorporado al router,
+`load_anthropic_auth` ahora prioriza OAuth de suscripción sobre cualquier
+`ANTHROPIC_AUTH_TOKEN` del shell, headers OAuth corregidos
+(`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`), alias
+opus/sonnet/haiku/fable actualizados, prefijos `claude/` normalizados
+antes de exportar `ANTHROPIC_MODEL`.
 
 ## Roadmap
 
