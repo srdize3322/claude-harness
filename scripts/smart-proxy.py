@@ -101,15 +101,22 @@ def _read_json(path):
 
 
 def load_anthropic_auth():
-    """Anthropic: prefer ANTHROPIC_AUTH_TOKEN env, fall back to OAuth."""
-    env_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
-    if env_token:
-        return {"type": "token", "token": env_token}
+    """Anthropic: prefer OAuth from the Claude Code subscription
+    (~/.claude/.credentials.json), fall back to ANTHROPIC_AUTH_TOKEN env only
+    if no OAuth is configured.
+
+    The previous order (env-token first) was risky: a stale ANTHROPIC_AUTH_TOKEN
+    in the shell would silently shadow the subscription OAuth, billing the user
+    against an API key when they intended to use their plan. Subscription users
+    almost never want the env-token path."""
     creds = _read_json(CREDENTIALS_PATH)
     if isinstance(creds, dict):
         oauth = creds.get("claudeAiOauth")
         if isinstance(oauth, dict) and oauth.get("accessToken"):
             return {"type": "oauth", "access_token": oauth["accessToken"]}
+    env_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+    if env_token and env_token != "smart-proxy-passthrough":
+        return {"type": "token", "token": env_token}
     return None
 
 
