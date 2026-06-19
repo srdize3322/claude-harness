@@ -2792,7 +2792,14 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
     if not use_plain_defaults and slots.haiku:
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
     if not use_plain_defaults and effective_provider.provider_id == "multi":
-        os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = model.model_id
+        # Strip the "claude/" prefix here so ANTHROPIC_MODEL gets a clean alias
+        # ("opus", "sonnet"…) that Claude Code resolves against its live catalog.
+        # Hardcoding the resolution in the proxy is brittle: model snapshots get
+        # deprecated, but Claude Code's alias map ships fresh on every release.
+        slot_main = model.model_id
+        if slot_main.startswith("claude/"):
+            slot_main = slot_main[len("claude/"):]
+        os.environ["CLAUDE_HARNESS_SLOT_MAIN"] = slot_main
         # Tell claude-multi explicitly which backend the user picked as the main provider
         # so it doesn't have to guess based on the model string.
         main_backend = provider.provider_id

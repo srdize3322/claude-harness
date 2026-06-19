@@ -141,20 +141,25 @@ else
   unset ANTHROPIC_API_KEY
 fi
 
+# Strip "claude/" prefix so Claude Code sees a clean alias ("opus", "sonnet"…)
+# that it can resolve against its live catalog. Hardcoding the resolved snapshot
+# in the proxy is brittle — model ids get deprecated, the alias map ships fresh.
+strip_claude_prefix() { printf '%s' "${1#claude/}"; }
+
 # Pass the main model
 if [ -n "$main_model" ] && [ "$main_model" != "default" ]; then
-  export ANTHROPIC_MODEL="$main_model"
+  export ANTHROPIC_MODEL="$(strip_claude_prefix "$main_model")"
 fi
 
 # Set per-slot models (the smart proxy routes these to the right backend)
 if [ -n "${CLAUDE_HARNESS_SLOT_OPUS:-}" ]; then
-  export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDE_HARNESS_SLOT_OPUS}"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$(strip_claude_prefix "$CLAUDE_HARNESS_SLOT_OPUS")"
 fi
 if [ -n "${CLAUDE_HARNESS_SLOT_SONNET:-}" ]; then
-  export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDE_HARNESS_SLOT_SONNET}"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$(strip_claude_prefix "$CLAUDE_HARNESS_SLOT_SONNET")"
 fi
 if [ -n "${CLAUDE_HARNESS_SLOT_HAIKU:-}" ]; then
-  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDE_HARNESS_SLOT_HAIKU}"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$(strip_claude_prefix "$CLAUDE_HARNESS_SLOT_HAIKU")"
 fi
 
 # Inform smart-proxy which backend to use for unprefixed models.
