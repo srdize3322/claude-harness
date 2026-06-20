@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-20 — Codex en multi-provider: 401 intermitente
+
+Cuando Codex se usa como slot o como main vía `claude-multi` (no como
+provider standalone), nada refrescaba su OAuth token. El wrapper
+`claude-codex` standalone hace el refresh al arrancar pero ese flujo
+no se ejecuta en el path de multi-provider.
+
+Resultado: después de ~1 h con el id_token vencido, las requests al
+codex-proxy alternaban entre 200 y 401 (porque el proxy lee el archivo
+en cada request pero la API valida más allá del exp del JWT). Claude
+Code muestra "Cooked for Xs" y el stream queda colgado.
+
+### Fix
+
+`claude-multi` ahora corre `refresh_codex_token_if_needed` al detectar
+que algún slot necesita Codex, antes de auto-arrancar los proxies. La
+heurística:
+
+- toma el `min(access_token.exp, id_token.exp)` — porque la API silenta
+  401 si el id_token venció aunque el access_token JWT diga 7 días;
+- también refresca si `last_refresh` en el JSON tiene más de 50 min,
+  por las dudas;
+- escribe el nuevo token a `~/.codex/auth.json` con `chmod 0600` y rename
+  atómico, igual que el wrapper standalone.
+
+Se puede desactivar con `CLAUDE_HARNESS_CODEX_NO_AUTO_REFRESH=1` (útil
+si querés debuggear el flujo manualmente).
+
+### Limitación conocida
+
+Si dejás Claude Code abierto más de ~1 hora y empieza una request
+nueva, el token puede volver a vencer durante la sesión. El refresh
+auto-mid-session debería estar dentro del codex-proxy (detectar 401,
+refrescar, reintentar). Queda como TODO; mientras tanto, basta con
+salir y volver a abrir `claude-harness`.
+
+### Verificado
+
+8/8 requests secuenciales devuelven 200 después del refresh, contra el
+patrón previo de 401/200 intermitente.
+
 ## 2026-06-20 — Gemini provider: 403 cuando hay GOOGLE_CLOUD_PROJECT en shell
 
 Cuando el usuario tenía `GOOGLE_CLOUD_PROJECT` exportada en el shell

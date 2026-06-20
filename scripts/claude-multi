@@ -135,6 +135,123 @@ ensure_gemini_proxy_if_needed() {
   fi
 }
 
+# Refresh Codex's OAuth token if it's close to expiring. The standalone
+# `claude-codex` wrapper does this on its own when it launches Claude Code
+# directly, but when Codex is used through multi-provider (codex slot, or
+# codex as main) the request goes through smart-proxy -> codex-proxy and
+# nobody refreshes — so after an hour the requests start coming back 401.
+#
+# Skip the refresh if CLAUDE_HARNESS_CODEX_NO_AUTO_REFRESH=1.
+refresh_codex_token_if_needed() {
+  local auth_path="${CODEX_AUTH_JSON:-$HOME/.codex/auth.json}"
+  [ -f "$auth_path" ] || return 0
+  [ "${CLAUDE_HARNESS_CODEX_NO_AUTO_REFRESH:-0}" = "1" ] && return 0
+
+  CODEX_AUTH_JSON="$auth_path" \
+  OAUTH_URL="https://auth.openai.com/oauth/token" \
+  OAUTH_CLIENT_ID="app_EMoamEEZ73f0CkXaXp7hrann" \
+  REFRESH_M="300" \
+  python3 - "$auth_path" <<'PY' 2>&1 | while read -r line; do log "codex auth: $line"; done
+import sys, json, base64, os, urllib.request, urllib.error, urllib.parse, pathlib
+from datetime import datetime, timezone
+
+auth_path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(auth_path.read_text())
+except Exception as e:
+    print(f"sin auth.json válido ({e}); seguimos")
+    sys.exit(0)
+
+t = data.get("tokens") or {}
+access_token = t.get("access_token", "")
+refresh_token = t.get("refresh_token", "")
+if not refresh_token:
+    print("sin refresh_token; ejecutá `codex login` para reauth")
+    sys.exit(0)
+
+def decode_exp(jwt: str) -> int:
+    try:
+        payload = jwt.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:
+        return 0
+
+now = int(datetime.now(timezone.utc).timestamp())
+margin = int(os.environ["REFRESH_M"])
+
+# Use the *earliest* of access_token / id_token expirations. The
+# access_token JWT often advertises a 7-day exp but the upstream backend
+# silently rejects it once the matching id_token (typical 1h) is gone, so
+# we have to refresh on that shorter clock too.
+access_exp = decode_exp(access_token)
+id_exp = decode_exp(t.get("id_token", ""))
+exps = [e for e in (access_exp, id_exp) if e > 0]
+if not exps:
+    print("no se pudo leer exp de ningún token; refrescando por las dudas")
+    earliest_exp = 0
+else:
+    earliest_exp = min(exps)
+
+# Belt-and-suspenders: also refresh if the JSON's last_refresh is older than
+# 50 minutes, regardless of what the JWTs claim.
+import re
+stale_last_refresh = False
+last_iso = data.get("last_refresh") or ""
+if last_iso:
+    try:
+        last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+        age_s = (datetime.now(timezone.utc) - last_dt).total_seconds()
+        stale_last_refresh = age_s > 50 * 60
+    except Exception:
+        stale_last_refresh = True
+else:
+    stale_last_refresh = True
+
+if earliest_exp and earliest_exp - now >= margin and not stale_last_refresh:
+    print(f"token aún válido ({(earliest_exp - now) // 60} min restantes)")
+    sys.exit(0)
+
+print(f"refrescando (earliest_exp={earliest_exp}, now={now}, "
+      f"stale_last_refresh={stale_last_refresh})")
+body = urllib.parse.urlencode({
+    "grant_type": "refresh_token",
+    "refresh_token": refresh_token,
+    "client_id": os.environ["OAUTH_CLIENT_ID"],
+    "scope": "openid profile email offline_access api.connectors.read api.connectors.write api.conversations.write",
+}).encode()
+req = urllib.request.Request(
+    os.environ["OAUTH_URL"], data=body,
+    headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        new = json.loads(resp.read())
+except urllib.error.HTTPError as e:
+    print(f"refresh falló HTTP {e.code} — ejecutá `codex login`")
+    sys.exit(0)
+except Exception as e:
+    print(f"refresh falló ({e}); seguimos con el token viejo")
+    sys.exit(0)
+
+for k in ("access_token", "id_token", "refresh_token"):
+    if k not in new:
+        print(f"respuesta inválida (falta {k}); no actualizamos")
+        sys.exit(0)
+
+data["tokens"]["access_token"] = new["access_token"]
+data["tokens"]["id_token"] = new["id_token"]
+data["tokens"]["refresh_token"] = new["refresh_token"]
+data["last_refresh"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+tmp = auth_path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(data, indent=2))
+os.chmod(tmp, 0o600)
+tmp.replace(auth_path)
+print(f"refresh OK; nuevo token válido por ~{decode_exp(new['access_token']) - now}s")
+PY
+}
+
 # Read auth files to detect which providers are usable
 auth_ok() {
   local prov="$1"
@@ -160,6 +277,13 @@ log "  main     = $main_model"
 log "  opus     = ${CLAUDE_HARNESS_SLOT_OPUS:-(= main)}"
 log "  sonnet   = ${CLAUDE_HARNESS_SLOT_SONNET:-(= main)}"
 log "  haiku    = ${CLAUDE_HARNESS_SLOT_HAIKU:-(= main)}"
+
+# Refresh tokens that go stale (Codex's id_token expires in ~1h). Done before
+# auto-starting the proxies so the codex-proxy reads the fresh auth.json on
+# first hit instead of caching the expired access_token.
+if need_codex_proxy; then
+  refresh_codex_token_if_needed
+fi
 
 # Auto-start proxies
 ensure_smart_proxy
