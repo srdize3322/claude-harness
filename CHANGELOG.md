@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-06-20 — Slot picker no se bloquea cuando hay Gemini
+
+`pick_agent_slots` precargaba los modelos de **todos** los providers en
+un dict-comprehension antes de pintar la pantalla. Cuando el provider
+`gemini` está en la lista eso dispara `agy models` que cold-startea un
+binario Go de 140 MB y tarda **30 s o más** en responder — y como la
+TUI ya tiene la pantalla tomada, parece colgada y el usuario no puede
+elegir nada (ni siquiera el slot de Sonnet).
+
+### Cambios
+
+- `pick_agent_slots`: fetch lazy + memo intra-sesión. Solo se descarga
+  la lista de un provider cuando el usuario realmente entra a su rama
+  del picker; la segunda vez es instantánea.
+- `fetch_gemini_models`: memo en RAM (`_GEMINI_MODELS_MEMO`) que vive
+  por la duración del proceso TUI. Timeout del subprocess bajado de
+  10 s → 3 s para que el primer fallo se note rápido y caiga al
+  fallback estático.
+- Catálogo de Gemini consolidado por familia. `agy models` lista
+  "Flash (Low)", "Flash (Medium)", "Flash (High)" pero las tres caen en
+  el mismo API id (`gemini-3-flash-preview`); el effort se sigue
+  configurando en la pantalla de thinking. Mostramos una sola fila por
+  familia para que el picker no quede engañoso.
+
 ## 2026-06-20 — Gemini: catálogo de modelos 100% dinámico desde `agy`
 
 `fetch_gemini_models` ahora invoca `agy models` y parsea su output con

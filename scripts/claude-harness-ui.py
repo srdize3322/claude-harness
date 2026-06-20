@@ -570,6 +570,9 @@ def fetch_codex_models() -> list[ModelItem]:
     return items
 
 
+_GEMINI_MODELS_MEMO: list[ModelItem] | None = None
+
+
 def fetch_gemini_models() -> list[ModelItem]:
     """Surface the Gemini model list dynamically from ``agy models``, then
     map each marketing-style label ("Gemini 3.5 Flash (Medium)") to the real
@@ -593,6 +596,10 @@ def fetch_gemini_models() -> list[ModelItem]:
 
     Falls back to a static list if ``agy`` is not on PATH.
     """
+    global _GEMINI_MODELS_MEMO
+    if _GEMINI_MODELS_MEMO is not None:
+        return _GEMINI_MODELS_MEMO
+
     static_fallback = [
         ModelItem("default", "Default"),
         ModelItem("gemini-3-pro-preview", "Gemini 3 Pro", context=1_000_000),
@@ -600,15 +607,26 @@ def fetch_gemini_models() -> list[ModelItem]:
     ]
     try:
         import subprocess
+        # `agy models` cold-starts a ~140 MB Go binary; on this user's machine it
+        # takes 30+ seconds. Use a 3 s budget — if it doesn't answer in that
+        # window we ship the static fallback so the TUI stays responsive.
         out = subprocess.check_output(
-            ["agy", "models"], stderr=subprocess.DEVNULL, timeout=10,
+            ["agy", "models"], stderr=subprocess.DEVNULL, timeout=3,
         ).decode().strip()
     except Exception:
+        _GEMINI_MODELS_MEMO = static_fallback
         return static_fallback
     if not out:
+        _GEMINI_MODELS_MEMO = static_fallback
         return static_fallback
 
+    # Consolidate per family — `agy models` lists every effort variant
+    # ("Flash (Low)", "Flash (Medium)", …) but they map to the same API id,
+    # and the effort/thinking level lives on its own wizard screen. Keeping
+    # one row per family gives a cleaner picker.
     items: list[ModelItem] = [ModelItem("default", "Default")]
+    seen_ids: set[str] = set()
+    seen_unsupported: set[str] = set()
     for line in out.splitlines():
         label = line.strip()
         if not label:
@@ -616,13 +634,23 @@ def fetch_gemini_models() -> list[ModelItem]:
         mid = _gemini_label_to_api_id(label)
         if not mid:
             # Surfaced by agy but not reachable via Cloud Code Assist.
+            base = label.split("(")[0].strip() or label
+            if base in seen_unsupported:
+                continue
+            seen_unsupported.add(base)
             items.append(ModelItem(
-                f"unsupported:{label}",
-                f"{label} (no API en este endpoint)",
+                f"unsupported:{base}",
+                f"{base} (no API en este endpoint)",
                 context=None,
             ))
             continue
-        items.append(ModelItem(mid, label, context=1_000_000))
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+        # Trim "(Medium)" / "(High)" so the row label is the family name.
+        family = label.split("(")[0].strip() or label
+        items.append(ModelItem(mid, family, context=1_000_000))
+    _GEMINI_MODELS_MEMO = items
     return items
 
 
@@ -2608,15 +2636,29 @@ def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) ->
     """
     sonnet = wizard_state.slots.sonnet
     haiku = wizard_state.slots.haiku
-    if provider.provider_id == "multi":
-        all_models_by_prov = {pid: get_slot_models_for_provider(pid) for pid in ALL_PROVIDER_IDS}
-    else:
-        all_models_by_prov = {provider.provider_id: get_slot_models_for_provider(provider.provider_id)}
+    # Lazy model fetch + per-session memo. The dict-comprehension pattern this
+    # replaces used to fire every provider's discovery up front; for `gemini`
+    # that means a 30 s cold-start of `agy models` *while curses owns the
+    # screen*, so the TUI looks frozen until it finishes. We fetch on demand
+    # the first time the user picks a provider in this slot session.
+    _slot_models_cache: dict[str, list[tuple[str, str, str]]] = {}
+
+    def _models_for(pid: str) -> list[tuple[str, str, str]]:
+        if pid not in _slot_models_cache:
+            try:
+                _slot_models_cache[pid] = get_slot_models_for_provider(pid)
+            except Exception:
+                _slot_models_cache[pid] = []
+        return _slot_models_cache[pid]
+
+    if provider.provider_id != "multi":
+        # Eagerly pre-load just the one provider for single-provider flows.
+        _models_for(provider.provider_id)
 
     def reset_stage_context(current_stage: str) -> tuple[str, str | None, list[tuple[str, str, str]] | None]:
         if provider.provider_id == "multi":
             return "provider", None, None
-        return "model", provider.provider_id, all_models_by_prov.get(provider.provider_id, [])
+        return "model", provider.provider_id, _models_for(provider.provider_id)
 
     stage = "sonnet"
     while True:
@@ -2698,7 +2740,7 @@ def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) ->
                         idx = sub_sel - 1
                         if 0 <= idx < len(provider_options):
                             sub_prov = provider_options[idx]
-                            sub_models = all_models_by_prov.get(sub_prov, [])
+                            sub_models = _models_for(sub_prov)
                             sub_stage = "model"
                             sub_query = ""
                             sub_scroll = 0
