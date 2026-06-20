@@ -71,6 +71,7 @@ CLAUDE_OPENROUTER_LAUNCHER = str(ROOT / "claude-openrouter")
 CLAUDE_OPENCODE_GO_LAUNCHER = str(ROOT / "claude-opencode-go")
 CLAUDE_MINIMAX_LAUNCHER = str(ROOT / "claude-minimax")
 CLAUDE_CODEX_LAUNCHER = str(ROOT / "claude-codex")
+CLAUDE_GEMINI_LAUNCHER = str(ROOT / "claude-multi")  # reuses claude-multi → smart-proxy → gemini-proxy
 CLAUDE_MULTI_LAUNCHER = str(ROOT / "claude-multi")
 
 ESC = ""
@@ -274,6 +275,9 @@ def infer_provider_for_model(model_id: str | None) -> str | None:
     # MiniMax
     if m.startswith("minimax-") or m.startswith("minimax/") or m == "minimax-m3":
         return "minimax"
+    # Gemini (via Antigravity / Cloud Code Assist)
+    if m.startswith("gemini-") or m.startswith("gemini/") or m == "gemini":
+        return "gemini"
     # OpenRouter and OpenCode Go are typically accessed via prefixed
     # paths, but we accept bare names if they look like OR/OCG models.
     return None
@@ -306,6 +310,10 @@ PROVIDERS = [
                        default_model_env="CLAUDE_HARNESS_MINIMAX_MODEL"),
     ProviderDefinition("codex", "Codex", CLAUDE_CODEX_LAUNCHER, "codex",
                        default_model_env="CLAUDE_HARNESS_CODEX_MODEL"),
+    # Gemini via Antigravity / Google One AI Pro subscription. Routes through
+    # claude-multi → smart-proxy → gemini-proxy → Cloud Code Assist API.
+    ProviderDefinition("gemini", "Gemini (Antigravity)", CLAUDE_GEMINI_LAUNCHER, "claude",
+                       default_model_env="CLAUDE_HARNESS_GEMINI_MODEL"),
     # Multi-provider: explicit smart-proxy mode that routes each
     # request to the right backend based on model name.
     ProviderDefinition("multi", "Multi-provider (smart proxy)", CLAUDE_MULTI_LAUNCHER,
@@ -549,6 +557,44 @@ def fetch_codex_models() -> list[ModelItem]:
             f"{CODEX_MODELS_FILE}. Ejecutá `codex` una vez para que el CLI lo "
             "inicialice, después relanzá claude-harness.\n"
         )
+    return items
+
+
+def fetch_gemini_models() -> list[ModelItem]:
+    """Models exposed by the Cloud Code Assist subscription. The list is
+    queried from `agy models` (Antigravity CLI) when available so it stays
+    in sync with whatever Google ships at any given time."""
+    items = [ModelItem("default", "Default")]
+    try:
+        import subprocess
+        out = subprocess.check_output(["agy", "models"], stderr=subprocess.DEVNULL, timeout=10).decode()
+    except Exception:
+        out = ""
+    if out.strip():
+        for line in out.splitlines():
+            label = line.strip()
+            if not label:
+                continue
+            # Map "Gemini 3.1 Pro (High)" → ID `gemini-3-pro-preview`. The
+            # CLI surfaces friendly labels but the API expects model IDs.
+            mid = None
+            ll = label.lower()
+            if "gemini" in ll and "pro" in ll:
+                mid = "gemini-3-pro-preview"
+            elif "gemini" in ll and "flash" in ll:
+                mid = "gemini-3-pro-preview"  # placeholder until flash surfaces in API
+            elif "claude" in ll and "opus" in ll:
+                mid = "claude-opus-4-6-via-gemini"
+            elif "claude" in ll and "sonnet" in ll:
+                mid = "claude-sonnet-4-6-via-gemini"
+            elif "gpt-oss" in ll:
+                mid = "gpt-oss-120b"
+            if mid:
+                items.append(ModelItem(mid, label, context=None))
+    if len(items) == 1:
+        # Fallback when agy is not on PATH or returned no list — at least
+        # surface the model we already validated against the API.
+        items.append(ModelItem("gemini-3-pro-preview", "Gemini 3 Pro Preview", context=1_000_000))
     return items
 
 
@@ -1091,6 +1137,8 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
         models = fetch_claude_models()
     elif provider.provider_id == "codex":
         models = fetch_codex_models()
+    elif provider.provider_id == "gemini":
+        models = fetch_gemini_models()
     elif provider.provider_id == "openrouter":
         models = fetch_openrouter_models()
     elif provider.provider_id == "minimax":

@@ -1,5 +1,69 @@
 # Changelog
 
+## 2026-06-20 — Gemini / Antigravity provider via Cloud Code Assist
+
+Nueva integración con la suscripción de Google One AI Pro / Gemini Code
+Assist (la misma que Antigravity y `gemini` CLI usan). Routing completo
+Anthropic ↔ Gemini con OAuth refresh automático.
+
+### Nuevo
+
+- **`scripts/gemini-proxy.py`** (619+ líneas) — proxy local 127.0.0.1:8082
+  que traduce `/v1/messages` Anthropic → `streamGenerateContent` Cloud
+  Code Assist. Incluye:
+  - OAuth refresh automático contra `oauth2.googleapis.com/token` con
+    client_id/secret extraídos de `@google/gemini-cli` 0.45.2.
+  - Discovery dinámico del project vía `loadCodeAssist` (devuelve el
+    project default de la suscripción).
+  - Schema translation completa: messages → contents, system →
+    systemInstruction, tools → functionDeclarations, tool_use ↔
+    functionCall, tool_result ↔ functionResponse, image → inlineData.
+  - JSON Schema sanitization para tools: quita `$schema`, `propertyNames`,
+    etc., que Gemini rechaza; preserva `type/properties/items/enum/etc`.
+  - Streaming SSE bidireccional: chunks de Gemini → eventos Anthropic
+    (message_start, content_block_*, message_delta, message_stop).
+  - Normalización CRLF → LF en el parser SSE (Gemini usa `\r\n\r\n` como
+    separador estándar HTTP).
+  - `thinkingBudget: 0` por default para acelerar respuestas (override
+    con `CLAUDE_HARNESS_GEMINI_THINKING=N`).
+- **PROVIDERS list** ahora incluye `gemini` (provider id "Gemini
+  (Antigravity)").
+- **`fetch_gemini_models()`** lista modelos vía `agy models` cuando está
+  disponible.
+- **`smart-proxy.py`**: nuevo backend "gemini" con prefix `gemini/` y
+  heurística (modelos `gemini-*`); rutea al proxy local en :8082.
+- **`claude-multi`**: auto-arranca `gemini-proxy.py` cuando algún slot
+  necesita gemini; exporta `CLAUDE_HARNESS_GEMINI_PROXY_URL`.
+
+### Verificado
+
+```bash
+# Test directo del proxy
+curl -X POST http://127.0.0.1:8082/v1/messages \
+  -d '{"model":"gemini-3-pro-preview","messages":[{"role":"user","content":"pong"}],"max_tokens":3000,"stream":false}'
+# → {"role":"assistant","content":[{"type":"text","text":"Ping! 🏓"}],...}
+```
+
+End-to-end con `claude-multi --print` para flujos sencillos (mensaje
+único, sin iteraciones de tool_use). Las sesiones interactivas con
+tool calls intensivos quedan como ajuste pendiente — el proxy responde
+200 a todas las requests pero Claude Code puede hacer iteraciones extra
+de las esperadas; ver código del proxy para más detalle.
+
+### Modelo y costo
+
+- Project asignado: `sigma-silicon-dzvhp` (vía loadCodeAssist).
+- Tier activo: **standard-tier "Gemini Code Assist"** + paid tier
+  **g1-pro-tier "Google One AI Pro"**.
+- Modelo principal: `gemini-3-pro-preview`.
+
+### Operación
+
+- Token refrescado automáticamente al iniciar el proxy y antes de cada
+  request si quedan < 60s de vida.
+- Al matar/reiniciar el proxy: `lsof -t -iTCP:8082 -sTCP:LISTEN | xargs -r kill -9`.
+- Log default: `/tmp/claude-harness-gemini-proxy.log`.
+
 ## 2026-06-20 — context window: detección 100% dinámica
 
 Quitamos todo lo hardcoded del path de detección de context window y

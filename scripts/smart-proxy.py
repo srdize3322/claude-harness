@@ -200,6 +200,7 @@ def detect_backend(model: str) -> tuple[str, str]:
         "minimax/": "minimax",
         "openrouter/": "openrouter",
         "opencode-go/": "opencode-go",
+        "gemini/": "gemini",
     }
     for prefix, backend in prefix_map.items():
         if ml.startswith(prefix):
@@ -222,6 +223,9 @@ def detect_backend(model: str) -> tuple[str, str]:
         return "minimax", bare
     if "/" in bare and bare.split("/")[0] == "minimax":
         return "minimax", bare
+    # Gemini via Antigravity / Cloud Code Assist
+    if bare_lower.startswith("gemini-") or bare_lower.startswith("gemini/") or bare_lower == "gemini":
+        return "gemini", bare
 
     # Fallback to main backend (set by the wrapper)
     return "main", bare
@@ -557,6 +561,25 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
                     return self._error(401, "OpenCode Go API key not configured", "authentication_error")
                 base = os.environ.get("OPENCODE_GO_BASE_URL", "").strip() or OPENCODE_GO_DEFAULT_BASE
                 url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
+            elif backend == "gemini":
+                # gemini-proxy handles OAuth refresh, project discovery, and
+                # the Anthropic↔Gemini schema translation. We just forward
+                # the body untouched (it's already Anthropic-shaped).
+                gemini_url = os.environ.get("CLAUDE_HARNESS_GEMINI_PROXY_URL", "").strip() \
+                    or "http://127.0.0.1:8082"
+                url = gemini_url.rstrip("/") + "/v1/messages"
+                h = dict(in_headers)
+                h.pop("authorization", None)
+                h.pop("x-api-key", None)
+                h.pop("sessionkey", None)
+                h.pop("anthropic-beta", None)
+                h.pop("anthropic-version", None)
+                h.pop("host", None)
+                h.pop("content-length", None)
+                # Make sure the clean_model is in the body before forwarding.
+                body_to_forward = dict(body)
+                body_to_forward["model"] = clean_model or body.get("model", "")
+                data = json.dumps(body_to_forward).encode("utf-8")
             else:
                 return self._error(400, f"Unknown backend: {backend}", "invalid_request_error")
         except Exception as e:

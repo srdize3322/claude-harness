@@ -14,10 +14,12 @@ SCRIPT_FILE="$(readlink -f "$0" 2>/dev/null || python3 -c "import os,sys; print(
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_FILE")" && pwd)"
 SMART_PROXY="${SMART_PROXY:-$SCRIPT_DIR/smart-proxy.py}"
 CODEX_PROXY="${CODEX_PROXY:-$SCRIPT_DIR/codex-proxy.py}"
+GEMINI_PROXY="${GEMINI_PROXY:-$SCRIPT_DIR/gemini-proxy.py}"
 
 SMART_HOST="${CLAUDE_HARNESS_SMART_PROXY_HOST:-127.0.0.1}"
 SMART_PORT="${CLAUDE_HARNESS_SMART_PROXY_PORT:-8081}"
 CODEX_PORT="${CLAUDE_HARNESS_CODEX_PROXY_PORT:-8080}"
+GEMINI_PORT="${CLAUDE_HARNESS_GEMINI_PROXY_PORT:-8082}"
 MULTI_VERBOSE="${CLAUDE_HARNESS_MULTI_VERBOSE:-0}"
 
 log() {
@@ -40,6 +42,18 @@ need_codex_proxy() {
     m="${!var:-}"
     case "$m" in
       gpt-*|codex-*|codex/*|o1*|o3*|o4*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Auto-start gemini-proxy if any slot routes through Cloud Code Assist
+need_gemini_proxy() {
+  local m
+  for var in CLAUDE_HARNESS_SLOT_MAIN CLAUDE_HARNESS_SLOT_OPUS CLAUDE_HARNESS_SLOT_SONNET CLAUDE_HARNESS_SLOT_HAIKU; do
+    m="${!var:-}"
+    case "$m" in
+      gemini-*|gemini/*|gemini) return 0 ;;
     esac
   done
   return 1
@@ -94,6 +108,33 @@ ensure_codex_proxy_if_needed() {
   fi
 }
 
+# Auto-start gemini-proxy
+ensure_gemini_proxy() {
+  if curl -sS --connect-timeout 1 "http://127.0.0.1:${GEMINI_PORT}/health" >/dev/null 2>&1; then
+    log "gemini-proxy ya corriendo en 127.0.0.1:${GEMINI_PORT}"
+    return 0
+  fi
+  log "Auto-arrancando gemini-proxy en 127.0.0.1:${GEMINI_PORT}..."
+  nohup python3 "$GEMINI_PROXY" --port "$GEMINI_PORT" \
+    >"${CLAUDE_HARNESS_GEMINI_PROXY_LOG:-/tmp/claude-harness-gemini-proxy.log}" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 20); do
+    if curl -sS --connect-timeout 1 "http://127.0.0.1:${GEMINI_PORT}/health" >/dev/null 2>&1; then
+      log "gemini-proxy arrancado (pid=$pid)"
+      return 0
+    fi
+    sleep 0.5
+  done
+  die "gemini-proxy no respondio en 127.0.0.1:${GEMINI_PORT}"
+}
+
+ensure_gemini_proxy_if_needed() {
+  if need_gemini_proxy; then
+    ensure_gemini_proxy
+  fi
+}
+
 # Read auth files to detect which providers are usable
 auth_ok() {
   local prov="$1"
@@ -122,6 +163,7 @@ log "  haiku    = ${CLAUDE_HARNESS_SLOT_HAIKU:-(= main)}"
 # Auto-start proxies
 ensure_smart_proxy
 ensure_codex_proxy_if_needed
+ensure_gemini_proxy_if_needed
 
 # Configure environment for Claude Code
 export ANTHROPIC_BASE_URL="http://${SMART_HOST}:${SMART_PORT}"
@@ -174,6 +216,7 @@ if [ -z "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ] && [ -n "$main_model" ] && [ "$main
     MiniMax-*|minimax/*) export CLAUDE_HARNESS_MAIN_BACKEND="minimax" ;;
     openrouter/*) export CLAUDE_HARNESS_MAIN_BACKEND="openrouter" ;;
     opencode-go/*|minimax-*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
+    gemini-*|gemini/*) export CLAUDE_HARNESS_MAIN_BACKEND="gemini" ;;
   esac
 fi
 
@@ -189,6 +232,7 @@ fi
 
 # Tell the Codex proxy (if running) the upstream URL
 export CLAUDE_HARNESS_CODEX_PROXY_URL="http://127.0.0.1:${CODEX_PORT}"
+export CLAUDE_HARNESS_GEMINI_PROXY_URL="http://127.0.0.1:${GEMINI_PORT}"
 
 # Reduce non-essential traffic
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
