@@ -199,17 +199,38 @@ def get_access_token() -> str:
 
 
 def get_project_id() -> str:
-    """Resolve the Cloud AI Companion project — either honoring
-    GOOGLE_CLOUD_PROJECT or asking loadCodeAssist for the default."""
+    """Resolve the Cloud AI Companion project tied to the user's subscription.
+
+    This proxy is for **subscription users** (Google One AI Pro / Code Assist)
+    who authenticate with OAuth. The project they need is auto-assigned by
+    Google when they signed up and is returned by ``loadCodeAssist``. The
+    user never has to enable any API in the Cloud Console; it's all handled
+    by the subscription.
+
+    Priority order:
+      1. ``loadCodeAssist`` — the normal flow. Returns the subscription-tied
+         project that already has Code Assist enabled. Cached for the rest
+         of the process.
+      2. ``CLAUDE_HARNESS_GEMINI_PROJECT`` — escape hatch for the rare case
+         where someone wants to point at a different project (e.g. a paid
+         Vertex AI project with Cloud Code Assist enabled separately).
+
+    We intentionally do *not* honor ``GOOGLE_CLOUD_PROJECT``. That variable
+    is used by API-key flows (Gemini Studio, Vertex SDK, BigQuery, etc.) for
+    completely unrelated projects, and silently routing the subscription's
+    OAuth token at one of those will 403 every time
+    ("cloudaicompanion.googleapis.com … not enabled").
+    """
     with _state_lock:
         if _state["project"]:
             return _state["project"]
 
-    env_proj = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
-    if env_proj:
+    override = (os.environ.get("CLAUDE_HARNESS_GEMINI_PROJECT") or "").strip()
+    if override:
         with _state_lock:
-            _state["project"] = env_proj
-        return env_proj
+            _state["project"] = override
+        _log(f"using project override from CLAUDE_HARNESS_GEMINI_PROJECT={override}")
+        return override
 
     token = get_access_token()
     body = {
@@ -231,7 +252,7 @@ def get_project_id() -> str:
         raise RuntimeError(f"loadCodeAssist returned no project: {payload}")
     with _state_lock:
         _state["project"] = project
-    _log(f"resolved project={project} tier={payload.get('currentTier', {}).get('id')}")
+    _log(f"resolved project={project} tier={payload.get('currentTier', {}).get('id')} (via loadCodeAssist)")
     return project
 
 

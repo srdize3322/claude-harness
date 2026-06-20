@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-06-20 — Gemini provider: 403 cuando hay GOOGLE_CLOUD_PROJECT en shell
+
+Cuando el usuario tenía `GOOGLE_CLOUD_PROJECT` exportada en el shell
+(típico para Vertex AI / Gemini Studio / BigQuery), el gemini-proxy
+honraba esa variable y mandaba la request al proyecto equivocado.
+Resultado: `403 PERMISSION_DENIED` con
+"cloudaicompanion.googleapis.com has not been used in project … or it
+is disabled" en cada llamada de un sub-agente.
+
+`get_project_id` ahora ignora `GOOGLE_CLOUD_PROJECT` siempre. El flujo
+normal es subscription users (Google One AI Pro / Code Assist) vía
+OAuth, donde Google auto-asigna un proyecto al sign-up y la API ya
+queda habilitada — ese es el proyecto que devuelve `loadCodeAssist` y
+es lo que usamos.
+
+Override sólo para casos raros: `CLAUDE_HARNESS_GEMINI_PROJECT=<id>`
+(escape hatch para usuarios que quieran apuntar a un proyecto Vertex
+AI custom con Code Assist habilitado por separado).
+
+Verificado: con `GOOGLE_CLOUD_PROJECT=gen-lang-client-…` en el shell,
+el proxy ahora resuelve `sigma-silicon-dzvhp` (project de la
+suscripción) y la request al endpoint devuelve 200.
+
 ## 2026-06-20 — Nuevo: `claude-harness-logs` para ver routing en vivo
 
 Cuando configurás slots con backends mixtos (Anthropic main + Codex /
