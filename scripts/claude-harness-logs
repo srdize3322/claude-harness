@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# claude-harness-logs — live view of routing decisions across the three proxies.
+#
+# Usage:
+#   claude-harness-logs            # follow all 3 proxies live (default)
+#   claude-harness-logs --tail N   # print the last N relevant lines and exit
+#   claude-harness-logs --raw      # don't filter — show everything
+#   claude-harness-logs smart      # only one proxy: smart | codex | gemini
+#
+# Highlights:
+#   - Routing decisions in green                (which backend each request hits)
+#   - upstream 2xx in dim green / 4xx-5xx red   (the answer the backend gave)
+#   - proxy start lines in cyan                 (so you know when a proxy restarted)
+# Everything else in grey.
+
+set -uo pipefail
+
+SMART_LOG="${CLAUDE_HARNESS_SMART_PROXY_LOG:-/tmp/claude-harness-smart-proxy.log}"
+CODEX_LOG="${CLAUDE_HARNESS_CODEX_PROXY_LOG:-/tmp/claude-harness-codex-proxy.log}"
+GEMINI_LOG="${CLAUDE_HARNESS_GEMINI_PROXY_LOG:-/tmp/claude-harness-gemini-proxy.log}"
+
+# Colors (only when stdout is a TTY)
+if [ -t 1 ]; then
+  C_RESET="\033[0m"
+  C_BOLD="\033[1m"
+  C_DIM="\033[2m"
+  C_GREEN="\033[32m"
+  C_RED="\033[31m"
+  C_YELLOW="\033[33m"
+  C_CYAN="\033[36m"
+  C_MAGENTA="\033[35m"
+  C_GREY="\033[90m"
+else
+  C_RESET=""; C_BOLD=""; C_DIM=""; C_GREEN=""; C_RED=""
+  C_YELLOW=""; C_CYAN=""; C_MAGENTA=""; C_GREY=""
+fi
+
+usage() {
+  sed -n '2,12p' "$0" | sed 's/^# //'
+  exit 0
+}
+
+MODE="follow"
+RAW=0
+TARGETS=("smart" "codex" "gemini")
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --raw) RAW=1; shift ;;
+    --tail) MODE="once"; TAIL_N="${2:-30}"; shift 2 ;;
+    smart|codex|gemini) TARGETS=("$1"); shift ;;
+    *) echo "Opcion desconocida: $1" >&2; exit 2 ;;
+  esac
+done
+
+# Resolve which files actually exist.
+declare -a LOG_FILES=()
+declare -a LABELS=()
+for t in "${TARGETS[@]}"; do
+  case "$t" in
+    smart)  f="$SMART_LOG"  ; lbl="smart"  ;;
+    codex)  f="$CODEX_LOG"  ; lbl="codex"  ;;
+    gemini) f="$GEMINI_LOG" ; lbl="gemini" ;;
+  esac
+  if [ -f "$f" ]; then
+    LOG_FILES+=("$f")
+    LABELS+=("$lbl")
+  else
+    printf "${C_YELLOW}aviso:${C_RESET} %-6s no encontrado (%s) — aun no se arrancó el proxy?\n" "$lbl" "$f" >&2
+  fi
+done
+
+if [ ${#LOG_FILES[@]} -eq 0 ]; then
+  echo "No hay logs disponibles. ¿Levantaste claude-multi al menos una vez?" >&2
+  exit 1
+fi
+
+# Tag each line with a coloured proxy label so we can tell who said what
+# when the three streams interleave.
+tag_lines() {
+  local label="$1"
+  local color="$2"
+  awk -v lbl="$label" -v c="$color" -v r="$C_RESET" \
+      '{printf "%s%-6s%s | %s\n", c, lbl, r, $0; fflush()}'
+}
+
+format_relevant_only() {
+  # Filter to lines that actually describe routing or errors. The proxies log
+  # a lot of mundane noise (HEAD /, /health, "listening on …") that just
+  # clutters the live view.
+  awk '
+    /Routing request|upstream [0-9]{3}|POST \/v1\/messages|listening on|Auto-arrancando|arrancado|ERROR|authentication_error|Unknown backend|API Error|x-api-key|streamGenerateContent/ {print}
+  '
+}
+
+colorize() {
+  # Per-line ANSI re-colouring based on whatever the proxies wrote.
+  awk -v g="$C_GREEN" -v gd="$C_GREEN$C_DIM" \
+      -v r="$C_RED" -v y="$C_YELLOW" \
+      -v c="$C_CYAN" -v m="$C_MAGENTA" \
+      -v gy="$C_GREY" -v rs="$C_RESET" -v b="$C_BOLD" '
+    {
+      line = $0
+      if (line ~ /Routing request/)            { printf "%s%s%s\n", g b, line, rs; next }
+      if (line ~ /upstream [45][0-9][0-9]/)    { printf "%s%s%s\n", r, line, rs; next }
+      if (line ~ /upstream 2[0-9][0-9]/)       { printf "%s%s%s\n", gd, line, rs; next }
+      if (line ~ /200 -/)                      { printf "%s%s%s\n", gd, line, rs; next }
+      if (line ~ /[45][0-9][0-9] -/)           { printf "%s%s%s\n", r, line, rs; next }
+      if (line ~ /listening on|Auto-arrancando|arrancado/) { printf "%s%s%s\n", c, line, rs; next }
+      if (line ~ /authentication_error|x-api-key|Unknown backend|API Error/) { printf "%s%s%s\n", r, line, rs; next }
+      if (line ~ /resolved project|refreshing access token/) { printf "%s%s%s\n", m, line, rs; next }
+      printf "%s%s%s\n", gy, line, rs
+    }
+  '
+}
+
+# Pick filter once based on flags.
+if [ "$RAW" = "1" ]; then
+  FILTER="cat"
+else
+  FILTER="format_relevant_only"
+fi
+
+if [ "$MODE" = "once" ]; then
+  for i in "${!LOG_FILES[@]}"; do
+    case "${LABELS[$i]}" in
+      smart)  COLOR="$C_GREEN" ;;
+      codex)  COLOR="$C_MAGENTA" ;;
+      gemini) COLOR="$C_CYAN" ;;
+    esac
+    # Filter FIRST, then take the last N. Otherwise `--tail 5` on a log whose
+    # last 5 lines are all HEAD / pings will print nothing.
+    if [ "$RAW" = "1" ]; then
+      tail -n "$TAIL_N" "${LOG_FILES[$i]}"
+    else
+      $FILTER < "${LOG_FILES[$i]}" | tail -n "$TAIL_N"
+    fi | tag_lines "${LABELS[$i]}" "$COLOR" | colorize
+  done
+  exit 0
+fi
+
+# Follow mode: a tail -F per file, each piped into tag + colorize, all merged.
+printf "${C_BOLD}claude-harness-logs${C_RESET} — siguiendo "
+for i in "${!LOG_FILES[@]}"; do
+  printf "%s%s%s " "$([ "$i" -gt 0 ] && echo " · ")" "${LABELS[$i]}" ""
+done
+echo
+printf "${C_DIM}Ctrl+C para salir. Usa --raw para ver todo, --tail N para snapshot rapido.${C_RESET}\n\n"
+
+# Use a temporary FIFO to merge the streams reliably.
+TMP_FIFO="$(mktemp -u "/tmp/ch-logs-$$-XXXX")"
+mkfifo "$TMP_FIFO" || { echo "No pude crear FIFO en /tmp" >&2; exit 1; }
+trap 'rm -f "$TMP_FIFO"; kill 0 2>/dev/null' EXIT INT TERM
+
+for i in "${!LOG_FILES[@]}"; do
+  case "${LABELS[$i]}" in
+    smart)  COLOR="$C_GREEN" ;;
+    codex)  COLOR="$C_MAGENTA" ;;
+    gemini) COLOR="$C_CYAN" ;;
+  esac
+  ( tail -n 0 -F "${LOG_FILES[$i]}" 2>/dev/null \
+      | { if [ "$RAW" = "1" ]; then cat; else format_relevant_only; fi; } \
+      | tag_lines "${LABELS[$i]}" "$COLOR" \
+      > "$TMP_FIFO" ) &
+done
+
+# Single reader collates everything in arrival order, applies the colour
+# legend, and prints to the user.
+cat "$TMP_FIFO" | colorize

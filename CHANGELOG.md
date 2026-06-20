@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-06-20 — Nuevo: `claude-harness-logs` para ver routing en vivo
+
+Cuando configurás slots con backends mixtos (Anthropic main + Codex /
+Gemini en sub-agentes), el wizard te confirma la elección pero no hay
+ninguna señal visual dentro de Claude Code de que efectivamente esté
+saliendo al backend que pediste — el `/model` nativo solo muestra el
+catálogo de Anthropic. El nuevo comando hace tail-f de los logs de los
+tres proxies con coloreo y filtrado de ruido (HEAD pings, /health,
+etc.), así ves request por request a qué backend va cada cosa.
+
+```bash
+claude-harness-logs               # follow live, los 3 proxies
+claude-harness-logs --tail 20     # snapshot de las últimas 20 líneas
+claude-harness-logs --tail 50 smart   # solo smart-proxy
+claude-harness-logs --raw         # sin filtrar, mostrar todo
+```
+
+Coloreo: Routing en verde negrita, upstream 2xx en verde tenue, 4xx/5xx
+en rojo, OAuth refresh + project discovery en magenta, mensajes de
+arranque en cyan.
+
+El symlink `~/.local/bin/claude-harness-logs` queda apuntando al
+runtime cuando el harness está instalado vía `install.sh` o cuando
+sincronizás manualmente.
+
 ## 2026-06-20 — Slot picker no se bloquea cuando hay Gemini
 
 `pick_agent_slots` precargaba los modelos de **todos** los providers en
