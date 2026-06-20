@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-06-20 — Gemini: catálogo de modelos 100% dinámico desde `agy`
+
+`fetch_gemini_models` ahora invoca `agy models` y parsea su output con
+las etiquetas exactas que muestra Antigravity (la TUI propia de agy).
+El usuario ve los mismos nombres en claude-harness que en agy.
+
+Mapeo verificado label → API id (vía probes contra el endpoint):
+
+| Label de `agy models`      | API id                          | Status  |
+|----------------------------|---------------------------------|---------|
+| Gemini 3.5 Flash (Low/Medium/High) | `gemini-3-flash-preview`        | ✅ live |
+| Gemini 3.1 Pro (Low/High)  | `gemini-3-pro-preview`          | ✅ live |
+| Gemini 3 Flash Lite        | `gemini-3.1-flash-lite-preview` | ✅ live |
+| Claude Sonnet 4.6 (Thinking) | (otro endpoint)                | ❌ ver abajo |
+| Claude Opus 4.6 (Thinking) | (otro endpoint)                 | ❌ ver abajo |
+| GPT-OSS 120B (Medium)      | (otro endpoint)                 | ❌ ver abajo |
+
+### Por qué Claude / GPT-OSS no funcionan todavía
+
+Estos modelos los rutea Antigravity por
+`businessaicode.googleapis.com` con el servicio gRPC
+`google.cloud.businessaicode.v1main.PredictionService/GenerateContent`,
+**no** por el endpoint REST `cloudcode-pa.googleapis.com/v1internal:
+streamGenerateContent` que es lo que el proxy actual sabe hablar.
+Soportarlos requiere un proxy gRPC adicional (proto + HTTP/2 framing);
+queda pendiente como provider separado.
+
+Los modelos no soportados se muestran en la lista con el sufijo
+`(no API en este endpoint)` y un id sintético `unsupported:*` para que
+el usuario los vea pero no termine en errores opacos si los elige.
+
+### Fallback
+
+Si `agy` no está en PATH, devolvemos una lista estática con los 2
+Gemini-3 principales (Pro + Flash) para no dejar al usuario sin opciones.
+
 ## 2026-06-20 — Gemini provider: TUI wiring + model catalog cleanup
 
 Follow-up al feat(provider) anterior. Tres fixes para que la TUI muestre

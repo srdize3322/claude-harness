@@ -571,25 +571,77 @@ def fetch_codex_models() -> list[ModelItem]:
 
 
 def fetch_gemini_models() -> list[ModelItem]:
-    """Models accessible through the Cloud Code Assist streamGenerateContent
-    endpoint. We don't trust ``agy models`` blindly because that CLI also
-    surfaces models served via Antigravity's private backend (Claude *, GPT-OSS,
-    older Gemini-2 lineups) which return 404 on the Code Assist API. The
-    Gemini-3 family is currently the only one Google routes here for our tier.
+    """Surface the Gemini model list dynamically from ``agy models``, then
+    map each marketing-style label ("Gemini 3.5 Flash (Medium)") to the real
+    API id + reasoning effort that the Cloud Code Assist streamGenerateContent
+    endpoint expects.
 
-    Verified live against the API:
-      - gemini-3-pro-preview     (Gemini 3.1 Pro — flagship reasoning)
-      - gemini-3-flash-preview   (Gemini 3.5 Flash — fastest)
-      - gemini-2.5-pro           (legacy — Pro tier shared quota)
-      - gemini-2.5-flash         (legacy — Flash tier shared quota)
+    Antigravity surfaces three families in ``agy models``:
+
+    1. Gemini 3 family (Pro / Flash / Flash-Lite) — accessible via
+       ``cloudcode-pa.googleapis.com/v1internal:streamGenerateContent``
+       (the REST endpoint that gemini-proxy.py speaks).
+    2. Claude (Opus 4.6, Sonnet 4.6) and GPT-OSS — routed through a
+       different gRPC backend (``businessaicode.googleapis.com``,
+       ``PredictionService/GenerateContent``) that the harness does not
+       support yet. They are returned with a ``(no API)`` suffix and a
+       NULL model id so the picker skips them gracefully.
+
+    The label suffixes (Low / Medium / High / Thinking) translate to the
+    ``thinkingConfig.thinkingBudget`` value the proxy passes upstream.
+    The mapping lives in ``EFFORT_TO_THINKING_BUDGET``.
+
+    Falls back to a static list if ``agy`` is not on PATH.
     """
-    return [
+    static_fallback = [
         ModelItem("default", "Default"),
-        ModelItem("gemini-3-pro-preview", "Gemini 3 Pro Preview", context=1_000_000),
-        ModelItem("gemini-3-flash-preview", "Gemini 3 Flash Preview", context=1_000_000),
-        ModelItem("gemini-2.5-pro", "Gemini 2.5 Pro (legacy)", context=2_000_000),
-        ModelItem("gemini-2.5-flash", "Gemini 2.5 Flash (legacy)", context=1_000_000),
+        ModelItem("gemini-3-pro-preview", "Gemini 3 Pro", context=1_000_000),
+        ModelItem("gemini-3-flash-preview", "Gemini 3 Flash", context=1_000_000),
     ]
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["agy", "models"], stderr=subprocess.DEVNULL, timeout=10,
+        ).decode().strip()
+    except Exception:
+        return static_fallback
+    if not out:
+        return static_fallback
+
+    items: list[ModelItem] = [ModelItem("default", "Default")]
+    for line in out.splitlines():
+        label = line.strip()
+        if not label:
+            continue
+        mid = _gemini_label_to_api_id(label)
+        if not mid:
+            # Surfaced by agy but not reachable via Cloud Code Assist.
+            items.append(ModelItem(
+                f"unsupported:{label}",
+                f"{label} (no API en este endpoint)",
+                context=None,
+            ))
+            continue
+        items.append(ModelItem(mid, label, context=1_000_000))
+    return items
+
+
+def _gemini_label_to_api_id(label: str) -> str | None:
+    """Map ``agy models`` labels to Cloud Code Assist model ids.
+
+    Returns None for models that ``agy`` lists but the public REST endpoint
+    rejects (Claude, GPT-OSS).
+    """
+    ll = label.lower()
+    if "gemini" in ll and "flash" in ll and "lite" in ll:
+        return "gemini-3.1-flash-lite-preview"
+    if "gemini" in ll and "flash" in ll:
+        return "gemini-3-flash-preview"
+    if "gemini" in ll and "pro" in ll:
+        return "gemini-3-pro-preview"
+    if "claude" in ll or "gpt-oss" in ll:
+        return None
+    return None
 
 
 def fetch_openrouter_models() -> list[ModelItem]:
