@@ -517,6 +517,14 @@ def fetch_claude_models() -> list[ModelItem]:
 
 
 def fetch_codex_models() -> list[ModelItem]:
+    """Read Codex's authoritative model list from ~/.codex/models_cache.json.
+
+    That file is the same source the native `codex` CLI uses, so context
+    windows here are always in sync with what Codex itself reports. We
+    deliberately do not ship hardcoded fallbacks: a stale snapshot baked into
+    the binary tends to drift the moment OpenAI ships a new gpt-5.x and
+    silently misreports the limit. If the cache is missing, the user can
+    populate it by launching `codex` once."""
     items = [ModelItem("default", "Default")]
     raw = load_json_file(CODEX_MODELS_FILE)
     models_raw = []
@@ -536,12 +544,11 @@ def fetch_codex_models() -> list[ModelItem]:
         ctx = entry.get("context_window")
         items.append(ModelItem(slug, label, context=ctx))
     if len(items) == 1:
-        items.extend([
-            ModelItem("gpt-5.5", "GPT-5.5", context=258000),
-            ModelItem("gpt-5.4", "GPT-5.4", context=258000),
-            ModelItem("gpt-5.4-mini", "GPT-5.4-Mini", context=400000),
-            ModelItem("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", context=258000),
-        ])
+        sys.stderr.write(
+            f"[claude-harness] Codex models cache vacío o no encontrado en "
+            f"{CODEX_MODELS_FILE}. Ejecutá `codex` una vez para que el CLI lo "
+            "inicialice, después relanzá claude-harness.\n"
+        )
     return items
 
 
@@ -799,8 +806,31 @@ def _lookup_model_info(model_id: str, catalog: dict[str, dict[str, dict]] | None
 
 def get_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] | None,
                              provider_id: str | None = None) -> int:
-    # Primero intentar sacar el limite exacto desde el proveedor (por ejemplo
-    # desde fetch_codex_models o fetch_openrouter_models).
+    return resolve_model_context_window(model_id, catalog, provider_id)[0]
+
+
+def resolve_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] | None,
+                                 provider_id: str | None = None) -> tuple[int, str]:
+    """Return ``(context_window, source)`` where ``source`` describes which input
+    decided the value (env override, harness cache, models.dev catalog, the
+    [1m] marker, or the unlisted-default fallback). The caller uses the source
+    label to log a verifiable trace at launch time."""
+    override_raw = os.environ.get("CLAUDE_HARNESS_CONTEXT_OVERRIDE", "").strip()
+    if override_raw:
+        try:
+            override_val = int(override_raw)
+            if override_val > 0:
+                return override_val, "env:CLAUDE_HARNESS_CONTEXT_OVERRIDE"
+        except ValueError:
+            sys.stderr.write(
+                f"[claude-harness] CLAUDE_HARNESS_CONTEXT_OVERRIDE='{override_raw}' "
+                "no es un entero válido; ignorado.\n"
+            )
+
+    # Provider-specific cache populated by fetch_codex_models / fetch_*_models.
+    # For Codex this mirrors ~/.codex/models_cache.json, the same source the
+    # native CLI consults — so the two never disagree as long as both read
+    # files are fresh.
     cache = load_model_cache()
     if isinstance(cache, dict) and provider_id:
         provider_cache = cache.get(provider_id, {})
@@ -809,8 +839,7 @@ def get_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] 
                 if isinstance(m, dict) and m.get("model_id") == model_id:
                     ctx = m.get("context")
                     if isinstance(ctx, (int, float)) and ctx > 0:
-                        return int(ctx)
-        # Buscar en multi-provider
+                        return int(ctx), f"harness-cache:{provider_id}"
         if provider_id == "multi":
             multi_cache = cache.get("multi", {})
             if isinstance(multi_cache, dict):
@@ -818,16 +847,16 @@ def get_model_context_window(model_id: str, catalog: dict[str, dict[str, dict]] 
                     if isinstance(m, dict) and m.get("model_id") == model_id:
                         ctx = m.get("context")
                         if isinstance(ctx, (int, float)) and ctx > 0:
-                            return int(ctx)
+                            return int(ctx), "harness-cache:multi"
 
     info = _lookup_model_info(model_id, catalog, provider_id)
     if info and isinstance(info, dict):
         ctx = info.get("limit", {}).get("context")
         if isinstance(ctx, (int, float)) and ctx > 0:
-            return int(ctx)
+            return int(ctx), "models.dev"
     if model_id and "[1m]" in model_id.lower():
-        return 1_000_000
-    return 200_000
+        return 1_000_000, "marker:[1m]"
+    return 200_000, "fallback:unlisted-default"
 
 
 def _should_auto_set_context_window() -> bool:
@@ -926,10 +955,17 @@ def apply_context_window_env(model_id: str, catalog: dict[str, dict[str, dict]] 
                              provider_id: str | None = None) -> dict | None:
     if not _should_auto_set_context_window():
         return None
-    real_ctx = get_model_context_window(model_id, catalog, provider_id)
+    real_ctx, ctx_source = resolve_model_context_window(model_id, catalog, provider_id)
     if real_ctx <= 0:
         return None
     is_anthropic = is_anthropic_model(model_id, provider_id)
+    verbose = os.environ.get("CLAUDE_HARNESS_VERBOSE", "").strip().lower() in ("1", "true", "yes")
+    if verbose or ctx_source.startswith("fallback") or ctx_source.startswith("env:"):
+        threshold_preview = int(real_ctx * 0.9)
+        sys.stderr.write(
+            f"[claude-harness] context: model={model_id} provider={provider_id} "
+            f"ctx={real_ctx} threshold={threshold_preview} source={ctx_source}\n"
+        )
     if is_anthropic:
         cc_model = model_id_for_claude_code(model_id, provider_id, catalog)
         # Use cc_model (que ya tiene [1m] si corresponde) para que
@@ -1031,7 +1067,21 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
     cached_entry = cache.get(cache_key, {})
     cached_models = cached_entry.get("models", [])
     cached_at = float(cached_entry.get("fetched_at", 0))
-    if not force_refresh and cached_models and time.time() - cached_at < MODEL_CACHE_TTL_SECONDS:
+
+    # For Codex, invalidate the harness cache as soon as ~/.codex/models_cache.json
+    # is newer than our snapshot — the native CLI rewrites that file when OpenAI
+    # ships a new model, so respecting its mtime keeps the two views in sync
+    # without waiting for the TTL.
+    source_invalidated = False
+    if provider.provider_id == "codex" and cached_at > 0:
+        try:
+            if CODEX_MODELS_FILE.exists() and CODEX_MODELS_FILE.stat().st_mtime > cached_at:
+                source_invalidated = True
+        except OSError:
+            pass
+
+    if (not force_refresh and not source_invalidated and cached_models
+            and time.time() - cached_at < MODEL_CACHE_TTL_SECONDS):
         return [ModelItem(i["model_id"], i["label"],
                           i.get("reasoning", False),
                           i.get("reasoning_options"),
@@ -2889,6 +2939,15 @@ def main() -> int:
         elif arg == "--slot-haiku" and i + 1 < len(sys.argv):
             cli_slot_haiku = sys.argv[i + 1]
             i += 2
+        elif arg == "--context-window" and i + 1 < len(sys.argv):
+            # Forces the context window for this run instead of detecting it
+            # from the model catalog. Useful when the catalog is stale or the
+            # model is not yet listed anywhere.
+            os.environ["CLAUDE_HARNESS_CONTEXT_OVERRIDE"] = sys.argv[i + 1]
+            i += 2
+        elif arg == "--verbose":
+            os.environ["CLAUDE_HARNESS_VERBOSE"] = "1"
+            i += 1
         else:
             extra_args.append(arg)
             i += 1

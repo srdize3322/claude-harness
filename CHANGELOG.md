@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-06-20 — context window: detección 100% dinámica
+
+Quitamos todo lo hardcoded del path de detección de context window y
+hacemos la lectura puramente dinámica desde la fuente autoritativa de
+cada provider. El cambio es transparente cuando los caches están sanos;
+cuando no, el harness lo dice en voz alta en vez de mentir con un valor
+viejo.
+
+### Cambios
+
+- **K — `fetch_codex_models` (`claude-harness-ui.py:519-546`)**: eliminado el
+  fallback hardcoded `gpt-5.4=258000`, `gpt-5.4-mini=400000`, etc. La
+  función ahora lee solo `~/.codex/models_cache.json` (la misma fuente
+  que usa el CLI nativo). Si el archivo no existe o está vacío, advierte
+  al usuario en stderr en lugar de servir números obsoletos.
+- **L — `resolve_model_context_window` (nueva, `claude-harness-ui.py`)**:
+  hermano de `get_model_context_window` que devuelve `(ctx, source)`.
+  Los labels de fuente son: `env:CLAUDE_HARNESS_CONTEXT_OVERRIDE`,
+  `harness-cache:<provider>`, `harness-cache:multi`, `models.dev`,
+  `marker:[1m]`, `fallback:unlisted-default`. Visibles en `--verbose`
+  y siempre que la fuente sea `fallback:*` o `env:*`.
+- **M — Override manual del context**: `--context-window N` CLI flag y
+  `CLAUDE_HARNESS_CONTEXT_OVERRIDE=N` env var. Útil para experimentar o
+  cuando un modelo nuevo no aparece en ningún catálogo.
+- **N — Cache invalidation por mtime (Codex)**: cuando
+  `~/.codex/models_cache.json` se actualiza, el harness invalida su
+  cache local sin esperar al TTL de 300s. La consistencia con el CLI
+  nativo de Codex es ahora inmediata.
+- **`--verbose` CLI flag**: imprime al stderr el modelo, provider,
+  context detectado y la fuente — para verificar de un vistazo de dónde
+  sale el número que `/context` reporta.
+
+### Verificación rápida
+
+```bash
+claude-harness --verbose --provider codex --model gpt-5.5 --print "hola"
+# [claude-harness] context: model=gpt-5.5 provider=codex ctx=272000 threshold=244800 source=harness-cache:codex
+```
+
+Si `/context` dentro de Claude Code muestra `13.3k/244.8k`, el `244.8k`
+es el threshold de auto-compact (`ctx * 0.9`), no el máximo. Es
+comportamiento esperado de Claude Code.
+
 ## 2026-06-18
 
 Fix mayor del case multi-provider con Anthropic como modelo principal (usando
