@@ -164,7 +164,7 @@ def get_provider_models_for_slots(provider_id: str) -> list[ModelItem]:
 # All provider ids we know about (used for the "Otro provider" sub-picker
 # when configuring agent slots).
 ALL_PROVIDER_IDS: tuple[str, ...] = (
-    "claude", "codex", "minimax", "openrouter", "opencode-go",
+    "claude", "codex", "minimax", "openrouter", "opencode-go", "gemini",
 )
 ALL_PROVIDER_LABELS: dict[str, str] = {
     "claude": "Anthropic",
@@ -172,6 +172,7 @@ ALL_PROVIDER_LABELS: dict[str, str] = {
     "minimax": "MiniMax",
     "openrouter": "OpenRouter",
     "opencode-go": "OpenCode Go",
+    "gemini": "Gemini",
 }
 
 
@@ -442,6 +443,13 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
     if provider.provider_id == "minimax":
         has_key = bool(get_minimax_api_key())
         return ProviderStatus(has_key, "login ok" if has_key else "falta login")
+    if provider.provider_id == "gemini":
+        creds = _read_json_file("~/.gemini/oauth_creds.json")
+        if not creds:
+            return ProviderStatus(False, "falta ~/.gemini/oauth_creds.json (login con `gemini` o `agy`)")
+        if not creds.get("refresh_token"):
+            return ProviderStatus(False, "credenciales sin refresh_token")
+        return ProviderStatus(True, "login ok (Google One AI Pro)")
     if provider.provider_id == "codex":
         import shutil
         import subprocess as sp
@@ -468,10 +476,12 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
             bool(get_minimax_api_key()),
             bool(get_openrouter_api_key()),
             bool(_opencode_key("opencode-go")),
+            # Gemini / Antigravity: check OAuth file
+            bool((_read_json_file("~/.gemini/oauth_creds.json") or {}).get("refresh_token")),
         ])
         if available < 2:
             return ProviderStatus(
-                False, f"necesita 2+ providers ({available}/5)"
+                False, f"necesita 2+ providers ({available}/6)"
             )
         return ProviderStatus(True, f"{available} providers ok")
     return ProviderStatus(False, "desconocido")
@@ -561,41 +571,25 @@ def fetch_codex_models() -> list[ModelItem]:
 
 
 def fetch_gemini_models() -> list[ModelItem]:
-    """Models exposed by the Cloud Code Assist subscription. The list is
-    queried from `agy models` (Antigravity CLI) when available so it stays
-    in sync with whatever Google ships at any given time."""
-    items = [ModelItem("default", "Default")]
-    try:
-        import subprocess
-        out = subprocess.check_output(["agy", "models"], stderr=subprocess.DEVNULL, timeout=10).decode()
-    except Exception:
-        out = ""
-    if out.strip():
-        for line in out.splitlines():
-            label = line.strip()
-            if not label:
-                continue
-            # Map "Gemini 3.1 Pro (High)" → ID `gemini-3-pro-preview`. The
-            # CLI surfaces friendly labels but the API expects model IDs.
-            mid = None
-            ll = label.lower()
-            if "gemini" in ll and "pro" in ll:
-                mid = "gemini-3-pro-preview"
-            elif "gemini" in ll and "flash" in ll:
-                mid = "gemini-3-pro-preview"  # placeholder until flash surfaces in API
-            elif "claude" in ll and "opus" in ll:
-                mid = "claude-opus-4-6-via-gemini"
-            elif "claude" in ll and "sonnet" in ll:
-                mid = "claude-sonnet-4-6-via-gemini"
-            elif "gpt-oss" in ll:
-                mid = "gpt-oss-120b"
-            if mid:
-                items.append(ModelItem(mid, label, context=None))
-    if len(items) == 1:
-        # Fallback when agy is not on PATH or returned no list — at least
-        # surface the model we already validated against the API.
-        items.append(ModelItem("gemini-3-pro-preview", "Gemini 3 Pro Preview", context=1_000_000))
-    return items
+    """Models accessible through the Cloud Code Assist streamGenerateContent
+    endpoint. We don't trust ``agy models`` blindly because that CLI also
+    surfaces models served via Antigravity's private backend (Claude *, GPT-OSS,
+    older Gemini-2 lineups) which return 404 on the Code Assist API. The
+    Gemini-3 family is currently the only one Google routes here for our tier.
+
+    Verified live against the API:
+      - gemini-3-pro-preview     (Gemini 3.1 Pro — flagship reasoning)
+      - gemini-3-flash-preview   (Gemini 3.5 Flash — fastest)
+      - gemini-2.5-pro           (legacy — Pro tier shared quota)
+      - gemini-2.5-flash         (legacy — Flash tier shared quota)
+    """
+    return [
+        ModelItem("default", "Default"),
+        ModelItem("gemini-3-pro-preview", "Gemini 3 Pro Preview", context=1_000_000),
+        ModelItem("gemini-3-flash-preview", "Gemini 3 Flash Preview", context=1_000_000),
+        ModelItem("gemini-2.5-pro", "Gemini 2.5 Pro (legacy)", context=2_000_000),
+        ModelItem("gemini-2.5-flash", "Gemini 2.5 Flash (legacy)", context=1_000_000),
+    ]
 
 
 def fetch_openrouter_models() -> list[ModelItem]:
@@ -735,6 +729,7 @@ PROVIDER_TO_CATALOG_ID = {
     "opencode-go": "opencode",
     "codex": "openai",
     "claude": "anthropic",
+    "gemini": "google",
 }
 
 CLAUDE_FAMILY_ALIASES = {"opus", "sonnet", "haiku", "fable", "mythos"}
@@ -1161,6 +1156,7 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
             "minimax": "MiniMax",
             "openrouter": "OpenRouter",
             "opencode-go": "OpenCode Go",
+            "gemini": "Gemini",
         }
         for prov_id, label in provider_labels.items():
             cat_id = PROVIDER_TO_CATALOG_ID.get(prov_id, prov_id)

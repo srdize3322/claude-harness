@@ -145,6 +145,7 @@ auth_ok() {
       ;;
     codex) [ -f "$HOME/.codex/auth.json" ] || return 1 ;;
     minimax|openrouter|opencode-go) [ -f "$HOME/.local/share/opencode/auth.json" ] || return 1 ;;
+    gemini) [ -f "$HOME/.gemini/oauth_creds.json" ] || return 1 ;;
     *) return 1 ;;
   esac
   return 0

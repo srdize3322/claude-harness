@@ -90,15 +90,33 @@ CODE_ASSIST_API = "v1internal"
 
 DEFAULT_MODEL = "gemini-3-pro-preview"
 
-# Mapping from the human-readable model labels surfaced by `agy models` and the
-# Gemini Code Assist tier to the actual model IDs accepted by the API.
+# Mapping from the human-readable labels Antigravity surfaces to the real model
+# IDs that the Cloud Code Assist streamGenerateContent endpoint accepts. Probed
+# via direct calls in 2026-06; check the README's model table if a new family
+# ships.
+#
+# Verified accepting IDs:
+#   gemini-3-pro-preview, gemini-3-flash-preview  (Gemini 3 family — current)
+#   gemini-2.5-pro, gemini-2.5-flash              (legacy, quota-shared)
+# Verified rejecting (404):
+#   claude-*, gpt-oss-*  — Antigravity exposes these in `agy models` but routes
+#   them through a different backend; the streamGenerateContent endpoint does
+#   not serve them.
 MODEL_ALIAS = {
+    # Gemini 3 Pro
     "gemini-3-pro": "gemini-3-pro-preview",
     "gemini-3-pro-preview": "gemini-3-pro-preview",
     "gemini-3.1-pro": "gemini-3-pro-preview",
-    "gemini-3.5-flash": "gemini-3-pro-preview",  # placeholder until flash exposed
+    "gemini-pro": "gemini-3-pro-preview",
     "gemini": "gemini-3-pro-preview",
-    "gemini-flash": "gemini-3-pro-preview",
+    # Gemini 3 Flash
+    "gemini-3-flash": "gemini-3-flash-preview",
+    "gemini-3-flash-preview": "gemini-3-flash-preview",
+    "gemini-3.5-flash": "gemini-3-flash-preview",
+    "gemini-flash": "gemini-3-flash-preview",
+    # Gemini 2.5 (legacy, low quota on this subscription)
+    "gemini-2.5-pro": "gemini-2.5-pro",
+    "gemini-2.5-flash": "gemini-2.5-flash",
 }
 
 

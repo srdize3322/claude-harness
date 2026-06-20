@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-06-20 — Gemini provider: TUI wiring + model catalog cleanup
+
+Follow-up al feat(provider) anterior. Tres fixes para que la TUI muestre
+Gemini en todos los lugares correctos y para que el catálogo refleje
+solamente los modelos que efectivamente sirve Cloud Code Assist.
+
+### Fixes
+
+- **`ALL_PROVIDER_IDS` / `ALL_PROVIDER_LABELS`** ahora incluyen "gemini".
+  Sin esto el slot picker del flujo agent-slots no listaba modelos Gemini
+  (`get_all_models_all_providers` iteraba solo sobre la tupla).
+- **`PROVIDER_TO_CATALOG_ID`** mapea "gemini" → "google". Permite que el
+  multi-provider builder consulte models.dev si en el futuro Google
+  expone los Gemini ahí.
+- **`provider_labels` del agregador multi** ahora incluye "gemini" para
+  que aparezca con su categoría correcta en el picker.
+- **`get_provider_status("gemini")`** chequea `~/.gemini/oauth_creds.json`
+  y `refresh_token`. Mensajes claros si falta auth.
+- **`get_provider_status("multi")`** suma Gemini al conteo (era `/5`,
+  ahora `/6`).
+- **`claude-multi` `auth_ok gemini`** valida el archivo de credenciales.
+
+### Model catalog cleanup
+
+`fetch_gemini_models` ya no confía en `agy models` porque el CLI lista
+modelos accesibles vía el backend privado de Antigravity (Claude Opus
+4.6, Sonnet 4.6, GPT-OSS 120B) que NO son ruteables por la API pública
+de Cloud Code Assist. Probados live:
+
+| Modelo                  | Endpoint Code Assist | Notas               |
+|-------------------------|----------------------|---------------------|
+| `gemini-3-pro-preview`  | ✅                   | flagship reasoning  |
+| `gemini-3-flash-preview`| ✅                   | fastest, low latency|
+| `gemini-2.5-pro`        | ✅                   | legacy, low quota   |
+| `gemini-2.5-flash`      | ✅                   | legacy, low quota   |
+| `claude-*-via-gemini`   | ❌ 404               | otro backend privado|
+| `gpt-oss-120b`          | ❌ 404               | otro backend privado|
+
+`MODEL_ALIAS` del proxy actualizado para mapear aliases comunes (`gemini`,
+`gemini-pro`, `gemini-flash`, `gemini-3.5-flash`…) a los IDs canónicos.
+
 ## 2026-06-20 — Gemini / Antigravity provider via Cloud Code Assist
 
 Nueva integración con la suscripción de Google One AI Pro / Gemini Code
