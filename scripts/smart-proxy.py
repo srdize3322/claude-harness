@@ -179,6 +179,51 @@ def get_opencode_go_key():
 # Routing
 # ---------------------------------------------------------------------------
 
+def _strip_empty_text_blocks(body: dict) -> dict:
+    """Remove empty `{type:"text", text:""}` blocks from messages so a stale
+    `/compact` artefact doesn't poison the rest of the session.
+
+    Operates on a shallow copy of `body` and rewrites `messages` (and any
+    `content` lists inside) in place. A message that ends up with no blocks
+    after the cull is replaced by a single ``[type:"text", text:" "]`` so the
+    role slot stays valid and the conversation shape isn't broken.
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return body
+    out = dict(body)
+    new_msgs = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            new_msgs.append(m)
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            kept = []
+            for blk in content:
+                if not isinstance(blk, dict):
+                    kept.append(blk)
+                    continue
+                if blk.get("type") == "text":
+                    txt = blk.get("text")
+                    if not isinstance(txt, str) or not txt.strip():
+                        continue
+                kept.append(blk)
+            if not kept:
+                kept = [{"type": "text", "text": " "}]
+            nm = dict(m)
+            nm["content"] = kept
+            new_msgs.append(nm)
+        elif isinstance(content, str) and not content.strip():
+            nm = dict(m)
+            nm["content"] = " "
+            new_msgs.append(nm)
+        else:
+            new_msgs.append(m)
+    out["messages"] = new_msgs
+    return out
+
+
 def detect_backend(model: str) -> tuple[str, str]:
     """Map a model name to (backend, clean_model).
 
@@ -443,6 +488,15 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
             body = json.loads(raw_body) if raw_body else {}
         except json.JSONDecodeError:
             return self._error(400, "Invalid JSON body", "invalid_request_error")
+
+        # Strip empty text content blocks before the body reaches any backend.
+        # After `/compact` or a partial tool roundtrip Claude Code can persist
+        # messages whose content array looks like [{type:"text", text:""}], and
+        # Anthropic rejects the whole request with
+        #   400 "messages: text content blocks must be non-empty"
+        # which kills the session for good. Drop those blocks here so a stale
+        # transcript never bricks downstream traffic, regardless of backend.
+        body = _strip_empty_text_blocks(body)
 
         model = body.get("model", "")
         
