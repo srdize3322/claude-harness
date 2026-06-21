@@ -179,20 +179,31 @@ def get_opencode_go_key():
 # Routing
 # ---------------------------------------------------------------------------
 
+# Placeholder we substitute when a message ends up with no real content blocks.
+# Whitespace-only (" ") risks Anthropic's validator treating it as empty just like
+# "" — use a tiny visible token instead. Three dots are short, semantically
+# neutral, and a guaranteed pass for any "non-empty" check downstream.
+_EMPTY_BLOCK_PLACEHOLDER = "..."
+
+
 def _strip_empty_text_blocks(body: dict) -> dict:
     """Remove empty `{type:"text", text:""}` blocks from messages so a stale
     `/compact` artefact doesn't poison the rest of the session.
 
     Operates on a shallow copy of `body` and rewrites `messages` (and any
     `content` lists inside) in place. A message that ends up with no blocks
-    after the cull is replaced by a single ``[type:"text", text:" "]`` so the
+    after the cull is replaced by a single ``[type:"text", text:"..."]`` so the
     role slot stays valid and the conversation shape isn't broken.
+
+    Logs a one-line summary to stderr whenever it actually edited anything so
+    the user can see the cleanup happening via `claude-harness-logs`.
     """
     msgs = body.get("messages")
     if not isinstance(msgs, list):
         return body
     out = dict(body)
     new_msgs = []
+    edits = 0
     for m in msgs:
         if not isinstance(m, dict):
             new_msgs.append(m)
@@ -200,6 +211,7 @@ def _strip_empty_text_blocks(body: dict) -> dict:
         content = m.get("content")
         if isinstance(content, list):
             kept = []
+            removed = 0
             for blk in content:
                 if not isinstance(blk, dict):
                     kept.append(blk)
@@ -207,19 +219,30 @@ def _strip_empty_text_blocks(body: dict) -> dict:
                 if blk.get("type") == "text":
                     txt = blk.get("text")
                     if not isinstance(txt, str) or not txt.strip():
+                        removed += 1
                         continue
                 kept.append(blk)
+            if removed:
+                edits += removed
             if not kept:
-                kept = [{"type": "text", "text": " "}]
+                kept = [{"type": "text", "text": _EMPTY_BLOCK_PLACEHOLDER}]
+                edits += 1
             nm = dict(m)
             nm["content"] = kept
             new_msgs.append(nm)
         elif isinstance(content, str) and not content.strip():
             nm = dict(m)
-            nm["content"] = " "
+            nm["content"] = _EMPTY_BLOCK_PLACEHOLDER
+            edits += 1
             new_msgs.append(nm)
         else:
             new_msgs.append(m)
+    if edits:
+        sys.stderr.write(
+            f"[smart-proxy] sanitized {edits} empty text block(s) in this request "
+            f"(would otherwise have triggered 400 'must be non-empty')\n"
+        )
+        sys.stderr.flush()
     out["messages"] = new_msgs
     return out
 
