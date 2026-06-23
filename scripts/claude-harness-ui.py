@@ -73,6 +73,7 @@ CLAUDE_MINIMAX_LAUNCHER = str(ROOT / "claude-minimax")
 CLAUDE_CODEX_LAUNCHER = str(ROOT / "claude-codex")
 CLAUDE_GEMINI_LAUNCHER = str(ROOT / "claude-multi")  # reuses claude-multi → smart-proxy → gemini-proxy
 CLAUDE_MULTI_LAUNCHER = str(ROOT / "claude-multi")
+CLAUDE_GATEWAY_LAUNCHER = str(ROOT / "claude-gateway")
 
 ESC = ""
 BOLD = ""
@@ -164,7 +165,7 @@ def get_provider_models_for_slots(provider_id: str) -> list[ModelItem]:
 # All provider ids we know about (used for the "Otro provider" sub-picker
 # when configuring agent slots).
 ALL_PROVIDER_IDS: tuple[str, ...] = (
-    "claude", "codex", "minimax", "openrouter", "opencode-go", "gemini",
+    "claude", "codex", "minimax", "openrouter", "opencode-go", "gemini", "gateway",
 )
 ALL_PROVIDER_LABELS: dict[str, str] = {
     "claude": "Anthropic",
@@ -172,8 +173,65 @@ ALL_PROVIDER_LABELS: dict[str, str] = {
     "minimax": "MiniMax",
     "openrouter": "OpenRouter",
     "opencode-go": "OpenCode Go",
+    "opencodego": "OpenCode Go",
     "gemini": "Gemini",
+    "gateway": "LLM Gateway",
 }
+
+GATEWAY_PROVIDER_IDS: tuple[str, ...] = (
+    "claude", "gemini", "codex", "minimax", "openrouter", "opencodego",
+)
+
+
+def _gateway_real_model_id(model_id: str | None) -> str:
+    if not model_id:
+        return ""
+    return model_id[len("gateway/"):] if model_id.startswith("gateway/") else model_id
+
+
+def infer_gateway_provider_for_model(model_id: str | None) -> str | None:
+    real = _gateway_real_model_id(model_id)
+    low = real.lower()
+    if not real:
+        return None
+    for prefix in ("claude/", "gemini/", "codex/", "minimax/", "openrouter/", "opencodego/"):
+        if low.startswith(prefix):
+            return prefix[:-1]
+    if low.startswith("claude-") or low in ("claude-opus", "claude-sonnet"):
+        return "claude"
+    if low.startswith("gemini-") or low in ("gemini-pro", "gemini-flash"):
+        return "gemini"
+    if low.startswith("gpt-") or low.startswith("codex-"):
+        return "codex"
+    if low.startswith("minimax-"):
+        return "minimax"
+    return None
+
+
+def format_slot_provider_label(slot_value: str | None) -> str:
+    if not slot_value:
+        return "?"
+    if slot_value.startswith("gateway/"):
+        gp = infer_gateway_provider_for_model(slot_value)
+        label = ALL_PROVIDER_LABELS.get(gp or "", gp or "Gateway")
+        return f"Gateway/{label}"
+    prov = infer_provider_for_model(slot_value)
+    return ALL_PROVIDER_LABELS.get(prov, "?")
+
+
+def get_gateway_slot_models_for_provider(gateway_provider_id: str) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for model in fetch_gateway_models():
+        if model.model_id == "default":
+            continue
+        if infer_gateway_provider_for_model(model.model_id) != gateway_provider_id:
+            continue
+        if model.model_id in seen:
+            continue
+        seen.add(model.model_id)
+        out.append((model.model_id, model.label, gateway_provider_id))
+    return out
 
 
 def get_all_models_all_providers() -> list[tuple[str, str, str]]:
@@ -191,7 +249,7 @@ def get_all_models_all_providers() -> list[tuple[str, str, str]]:
         for m in models:
             # Prefix model_id with provider/ to disambiguate in the picker.
             # The smart proxy strips the prefix when routing.
-            prefixed = f"{prov_id}/{m.model_id}"
+            prefixed = m.model_id if m.model_id.startswith(f"{prov_id}/") else f"{prov_id}/{m.model_id}"
             if prefixed in seen:
                 continue
             seen.add(prefixed)
@@ -234,7 +292,7 @@ def get_multi_provider_main_models(provider_id: str, force_refresh: bool = False
     for model in models:
         if model.model_id == "default":
             continue
-        prefixed_id = f"{provider_id}/{model.model_id}"
+        prefixed_id = model.model_id if model.model_id.startswith(f"{provider_id}/") else f"{provider_id}/{model.model_id}"
         if prefixed_id in seen:
             continue
         seen.add(prefixed_id)
@@ -245,6 +303,19 @@ def get_multi_provider_main_models(provider_id: str, force_refresh: bool = False
             model.reasoning_options,
             model.context,
         ))
+    return out
+
+
+def get_gateway_main_models(gateway_provider_id: str, force_refresh: bool = False) -> list[ModelItem]:
+    """Return LLM Gateway models filtered by internal provider.
+
+    Gateway model ids stay prefixed as ``gateway/<real-model>`` so the
+    smart proxy can select backend=gateway while forwarding the real model
+    id to LiteLLM.
+    """
+    out: list[ModelItem] = []
+    for model_id, label, _ in get_gateway_slot_models_for_provider(gateway_provider_id):
+        out.append(ModelItem(model_id, label))
     return out
 
 
@@ -315,6 +386,10 @@ PROVIDERS = [
     # claude-multi → smart-proxy → gemini-proxy → Cloud Code Assist API.
     ProviderDefinition("gemini", "Gemini (Antigravity)", CLAUDE_GEMINI_LAUNCHER, "claude",
                        default_model_env="CLAUDE_HARNESS_GEMINI_MODEL"),
+    # LLM Gateway: local LiteLLM gateway. It still launches through the
+    # smart-proxy shim so Claude Code can use non-Anthropic model ids safely.
+    ProviderDefinition("gateway", "LLM Gateway", CLAUDE_GATEWAY_LAUNCHER, "claude",
+                       default_model_env="CLAUDE_HARNESS_GATEWAY_MODEL"),
     # Multi-provider: explicit smart-proxy mode that routes each
     # request to the right backend based on model name.
     ProviderDefinition("multi", "Multi-provider (smart proxy)", CLAUDE_MULTI_LAUNCHER,
@@ -422,6 +497,40 @@ def get_minimax_api_key() -> str | None:
     return auth.get("minimax", {}).get("key")
 
 
+def get_gateway_root() -> Path:
+    root = os.environ.get("CLAUDE_HARNESS_GATEWAY_ROOT") or load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_GATEWAY_ROOT")
+    return Path(root).expanduser() if root else HOME / "llm-gateway"
+
+
+def get_gateway_url() -> str:
+    return (os.environ.get("CLAUDE_HARNESS_GATEWAY_URL")
+            or load_env_file(HARNESS_ENV_FILE).get("CLAUDE_HARNESS_GATEWAY_URL")
+            or "http://127.0.0.1:4000").rstrip("/")
+
+
+def get_gateway_api_key() -> str | None:
+    key = os.environ.get("LITELLM_MASTER_KEY") or load_env_file(HARNESS_ENV_FILE).get("LITELLM_MASTER_KEY")
+    if key:
+        return key
+    return load_env_file(get_gateway_root() / ".env").get("LITELLM_MASTER_KEY")
+
+
+def gateway_models_endpoint_ok() -> bool:
+    key = get_gateway_api_key()
+    if not key:
+        return False
+    req = urllib.request.Request(
+        get_gateway_url() + "/v1/models",
+        headers={"Authorization": f"Bearer {key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            return True
+    except Exception:
+        return False
+
+
 def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
     if provider.provider_id == "claude":
         import subprocess as sp
@@ -450,6 +559,10 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
         if not creds.get("refresh_token"):
             return ProviderStatus(False, "credenciales sin refresh_token")
         return ProviderStatus(True, "login ok (Google One AI Pro)")
+    if provider.provider_id == "gateway":
+        if not get_gateway_api_key():
+            return ProviderStatus(False, "falta ~/llm-gateway/.env")
+        return ProviderStatus(True, "gateway ok" if gateway_models_endpoint_ok() else "config ok, down")
     if provider.provider_id == "codex":
         import shutil
         import subprocess as sp
@@ -478,10 +591,11 @@ def get_provider_status(provider: ProviderDefinition) -> ProviderStatus:
             bool(_opencode_key("opencode-go")),
             # Gemini / Antigravity: check OAuth file
             bool((_read_json_file("~/.gemini/oauth_creds.json") or {}).get("refresh_token")),
+            bool(get_gateway_api_key()),
         ])
         if available < 2:
             return ProviderStatus(
-                False, f"necesita 2+ providers ({available}/6)"
+                False, f"necesita 2+ providers ({available}/7)"
             )
         return ProviderStatus(True, f"{available} providers ok")
     return ProviderStatus(False, "desconocido")
@@ -701,6 +815,55 @@ def fetch_openrouter_models() -> list[ModelItem]:
         label = str(entry.get("name", slug)).strip() or slug
         ctx = entry.get("context_length")
         items.append(ModelItem(slug, label, context=ctx))
+    return items
+
+
+def fetch_gateway_models() -> list[ModelItem]:
+    api_key = get_gateway_api_key()
+    if not api_key:
+        raise RuntimeError("llm-gateway no tiene LITELLM_MASTER_KEY configurado en ~/llm-gateway/.env")
+    items = [ModelItem("default", "Default")]
+    seen: set[str] = set()
+    request = urllib.request.Request(
+        get_gateway_url() + "/v1/models",
+        headers={"Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        for entry in payload.get("data", []):
+            if not isinstance(entry, dict):
+                continue
+            mid = str(entry.get("id", "")).strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            label = str(entry.get("display_name") or entry.get("name") or mid).strip() or mid
+            items.append(ModelItem(f"gateway/{mid}", label))
+        if len(items) > 1:
+            return items
+    except Exception:
+        # Fall back to the generated LiteLLM config so the picker still works
+        # when the gateway is configured but currently stopped. The launcher can
+        # auto-start it before Claude Code begins sending requests.
+        pass
+
+    cfg = get_gateway_root() / "litellm" / "config.yaml"
+    try:
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            m = re.search(r"model_name:\s*[\"']?([^\"']+)", line)
+            if not m:
+                continue
+            mid = m.group(1).strip()
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            items.append(ModelItem(f"gateway/{mid}", mid))
+    except OSError:
+        pass
+    if len(items) == 1:
+        raise RuntimeError("no pude listar modelos de llm-gateway; corré ~/llm-gateway/scripts/status")
     return items
 
 
@@ -1220,6 +1383,8 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
         models = fetch_catalog_models("minimax", MINIMAX_MODELS)
     elif provider.provider_id == "opencode-go":
         models = fetch_catalog_models("opencode-go", OPENCODE_GO_MODELS)
+    elif provider.provider_id == "gateway":
+        models = fetch_gateway_models()
     elif provider.provider_id == "multi":
         # Multi-provider: aggregate ALL models from ALL backends so the
         # user can pick any model as the main. Models are prefixed with
@@ -1237,6 +1402,7 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
             "openrouter": "OpenRouter",
             "opencode-go": "OpenCode Go",
             "gemini": "Gemini",
+            "gateway": "LLM Gateway",
         }
         for prov_id, label in provider_labels.items():
             cat_id = PROVIDER_TO_CATALOG_ID.get(prov_id, prov_id)
@@ -1267,7 +1433,7 @@ def fetch_models_for_provider(provider: ProviderDefinition, force_refresh: bool 
                     name = info.get("name") or info.get("display_name")
                     if name:
                         display = name
-                prefixed_id = f"{prov_id}/{mid}"
+                prefixed_id = mid if mid.startswith(f"{prov_id}/") else f"{prov_id}/{mid}"
                 prefixed_label = f"[{label}] {display}"
                 models.append(ModelItem(prefixed_id, prefixed_label))
     else:
@@ -1954,15 +2120,16 @@ def draw_model_list(stdscr, provider, models, filtered, favs, default_model,
     draw_footer(stdscr, "[Enter] elegir  [Ctrl+S] fav  [Ctrl+D] default  [Ctrl+F] filtro  [Ctrl+R] recargar  [Backspace] borrar  [Esc] limpiar/volver")
 
 
-def draw_multi_provider_main_provider_list(stdscr, wizard_state: WizardState, query: str,
-                                           provider_ids: list[str], sel: int) -> None:
+def draw_main_provider_list(stdscr, wizard_state: WizardState, query: str,
+                            provider_ids: list[str], sel: int,
+                            subtitle: str) -> None:
     stdscr.erase()
     row = draw_wizard_chrome(
         stdscr,
         wizard_state,
         2,
         "Modelos",
-        subtitle="Multi-provider  |  elige backend para el modelo principal",
+        subtitle=subtitle,
         query=query,
         message="Selecciona primero el provider y después busca el modelo.",
         message_cp=CP_HINT,
@@ -2002,12 +2169,13 @@ def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) 
             ]
             if provider_sel >= len(filtered_provider_ids):
                 provider_sel = max(0, len(filtered_provider_ids) - 1)
-            draw_multi_provider_main_provider_list(
+            draw_main_provider_list(
                 stdscr,
                 wizard_state,
                 provider_query,
                 filtered_provider_ids,
                 provider_sel,
+                "Multi-provider  |  elige backend para el modelo principal",
             )
             stdscr.refresh()
             key = stdscr.getch()
@@ -2151,9 +2319,185 @@ def pick_multi_provider_main_model(stdscr, provider, wizard_state: WizardState) 
             scroll = 0
 
 
+def pick_gateway_main_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
+    provider_query = ""
+    provider_sel = 0
+    selected_provider_id: str | None = None
+    models: list[ModelItem] = []
+    error = ""
+    favs = load_favorites().get(provider.provider_id, [])
+    default_model = get_default_model(provider)
+    query = ""
+    show_favs_only = False
+    scroll = 0
+    sel = 0
+    catalog = fetch_models_dev_catalog(force=False)
+
+    while True:
+        if selected_provider_id is None:
+            filtered_provider_ids = [
+                prov_id for prov_id in GATEWAY_PROVIDER_IDS
+                if not provider_query
+                or provider_query.lower() in ALL_PROVIDER_LABELS.get(prov_id, prov_id).lower()
+                or provider_query.lower() in prov_id.lower()
+            ]
+            if provider_sel >= len(filtered_provider_ids):
+                provider_sel = max(0, len(filtered_provider_ids) - 1)
+            draw_main_provider_list(
+                stdscr,
+                wizard_state,
+                provider_query,
+                filtered_provider_ids,
+                provider_sel,
+                "LLM Gateway  |  elige proveedor interno para el modelo principal",
+            )
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == -1:
+                continue
+            if key == 27:
+                return ScreenResult("back")
+            if key == curses.KEY_UP and filtered_provider_ids:
+                provider_sel = (provider_sel - 1) % len(filtered_provider_ids)
+            elif key == curses.KEY_DOWN and filtered_provider_ids:
+                provider_sel = (provider_sel + 1) % len(filtered_provider_ids)
+            elif key in (curses.KEY_HOME, curses.KEY_PPAGE):
+                provider_sel = 0
+            elif key in (curses.KEY_END, curses.KEY_NPAGE):
+                provider_sel = max(0, len(filtered_provider_ids) - 1)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                if not filtered_provider_ids:
+                    continue
+                selected_provider_id = filtered_provider_ids[provider_sel]
+                try:
+                    models = get_gateway_main_models(selected_provider_id, force_refresh=True)
+                    error = ""
+                except Exception as e:
+                    models = []
+                    error = str(e)
+                query = ""
+                show_favs_only = False
+                scroll = 0
+                sel = 0
+            elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+                if provider_query:
+                    provider_query = provider_query[:-1]
+                    provider_sel = 0
+            elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+                return ScreenResult("back")
+            elif key in (KEY_CTRL_C, 3):
+                return ScreenResult("cancel")
+            elif 32 <= key <= 126:
+                provider_query += chr(key)
+                provider_sel = 0
+            continue
+
+        base = models
+        if query:
+            ql = query.lower()
+            base = [m for m in models if ql in m.model_id.lower() or ql in m.label.lower()]
+        filtered = [m for m in base if m.model_id in favs] if show_favs_only else base
+        if sel >= len(filtered):
+            sel = max(0, len(filtered) - 1)
+        if sel < scroll:
+            scroll = sel
+        if sel >= scroll + PAGE_SIZE:
+            scroll = sel - PAGE_SIZE + 1
+
+        current_state = WizardState(
+            provider=wizard_state.provider,
+            model=wizard_state.model,
+            thinking=wizard_state.thinking,
+            permission=wizard_state.permission,
+            slots=wizard_state.slots,
+        )
+        draw_model_list(
+            stdscr,
+            provider,
+            models,
+            filtered,
+            favs,
+            default_model,
+            query,
+            show_favs_only,
+            scroll,
+            sel,
+            error=error,
+            wizard_state=current_state,
+            subtitle_override=(
+                f"LLM Gateway  |  {ALL_PROVIDER_LABELS.get(selected_provider_id, selected_provider_id)}"
+                f"  |  {len(filtered)} modelos"
+            ),
+            catalog=catalog,
+        )
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key == -1:
+            continue
+        if key == 27:
+            if query:
+                query = ""
+                sel = 0
+                scroll = 0
+                continue
+            selected_provider_id = None
+            provider_query = ""
+            provider_sel = 0
+            continue
+        elif key == curses.KEY_UP:
+            sel = max(0, sel - 1)
+        elif key == curses.KEY_DOWN:
+            sel = min(max(0, len(filtered) - 1), sel + 1)
+        elif key == curses.KEY_PPAGE:
+            sel = max(0, sel - PAGE_SIZE)
+        elif key == curses.KEY_NPAGE:
+            sel = min(max(0, len(filtered) - 1), sel + PAGE_SIZE)
+        elif key == curses.KEY_HOME:
+            sel = 0
+        elif key == curses.KEY_END:
+            sel = max(0, len(filtered) - 1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if filtered:
+                return ScreenResult("next", filtered[sel])
+        elif key == KEY_CTRL_R:
+            try:
+                models = get_gateway_main_models(selected_provider_id, force_refresh=True)
+                error = ""
+            except Exception as e:
+                error = str(e)
+        elif key == KEY_CTRL_S:
+            if filtered:
+                toggle_favorite(provider.provider_id, filtered[sel].model_id)
+                favs = load_favorites().get(provider.provider_id, [])
+        elif key == KEY_CTRL_D:
+            if filtered:
+                set_default_model(provider, filtered[sel].model_id)
+                default_model = filtered[sel].model_id
+        elif key == KEY_CTRL_F:
+            show_favs_only = not show_favs_only
+            sel = 0
+        elif key in (KEY_CTRL_Q, ord("q"), ord("Q")):
+            selected_provider_id = None
+            provider_query = ""
+            provider_sel = 0
+        elif key in (KEY_CTRL_X, curses.KEY_BACKSPACE, 127, 263):
+            if query:
+                query = query[:-1]
+                sel = 0
+                scroll = 0
+        elif key in (KEY_CTRL_C, 3):
+            return ScreenResult("cancel")
+        elif 32 <= key <= 126:
+            query += chr(key)
+            sel = 0
+            scroll = 0
+
+
 def pick_model(stdscr, provider, wizard_state: WizardState) -> ScreenResult:
     if provider.provider_id == "multi":
         return pick_multi_provider_main_model(stdscr, provider, wizard_state)
+    if provider.provider_id == "gateway":
+        return pick_gateway_main_model(stdscr, provider, wizard_state)
     catalog = fetch_models_dev_catalog(force=False)
     try:
         models = fetch_models_for_provider(provider, force_refresh=True)
@@ -2506,6 +2850,8 @@ def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, s
     h, w = stdscr.getmaxyx()
     if provider.provider_id == "multi":
         subtitle = "mezcla entre providers habilitada"
+    elif provider.provider_id == "gateway":
+        subtitle = "elegi proveedor interno del gateway y luego modelo"
     else:
         subtitle = f"solo modelos de {provider.label}"
     message = "Sin coincidencias; se muestran las opciones base." if no_match else ""
@@ -2526,8 +2872,7 @@ def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, s
         safe_addstr(stdscr, section1_row, 0, "  > slot sonnet:", attr_pair(CP_TITLE) | attr_bold())
     else:
         safe_addstr(stdscr, section1_row, 0, "    slot sonnet:", attr_pair(CP_DIM))
-    sonnet_prov = infer_provider_for_model(sonnet) if sonnet else None
-    sonnet_str = f"{sonnet} [{ALL_PROVIDER_LABELS.get(sonnet_prov, '?')}]" if sonnet else "= main (default)"
+    sonnet_str = f"{sonnet} [{format_slot_provider_label(sonnet)}]" if sonnet else "= main (default)"
     safe_addstr(stdscr, section1_row, 16, f"  {sonnet_str}",
                 attr_pair(CP_HINT) if sonnet else attr_pair(CP_DIM))
 
@@ -2536,8 +2881,7 @@ def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, s
         safe_addstr(stdscr, section2_row, 0, "  > slot haiku:", attr_pair(CP_TITLE) | attr_bold())
     else:
         safe_addstr(stdscr, section2_row, 0, "    slot haiku:", attr_pair(CP_DIM))
-    haiku_prov = infer_provider_for_model(haiku) if haiku else None
-    haiku_str = f"{haiku} [{ALL_PROVIDER_LABELS.get(haiku_prov, '?')}]" if haiku else "= main (default)"
+    haiku_str = f"{haiku} [{format_slot_provider_label(haiku)}]" if haiku else "= main (default)"
     safe_addstr(stdscr, section2_row, 16, f"  {haiku_str}",
                 attr_pair(CP_HINT) if haiku else attr_pair(CP_DIM))
 
@@ -2545,8 +2889,9 @@ def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, s
     list_start = section2_row + 3
     current_slot_value = sonnet if stage == "sonnet" else haiku
     if sub_stage == "provider":
+        provider_prompt = "provider del Gateway" if provider.provider_id == "gateway" else "provider"
         safe_addstr(stdscr, list_start - 1, 0,
-                    f"  Elegi provider para slot {stage}:", attr_pair(CP_HINT))
+                    f"  Elegi {provider_prompt} para slot {stage}:", attr_pair(CP_HINT))
         provider_options = provider_options or []
         # Option: "= main" (uses main provider's main model)
         row = list_start
@@ -2622,7 +2967,7 @@ def draw_slots_picker(stdscr, wizard_state: WizardState, provider, main_model, s
                         f"  {sub_scroll + 1}-{min(total, sub_scroll + PAGE_SIZE)} de {total}",
                         attr_pair(CP_DIM))
         footer = "Enter: elegir  [Backspace] borrar  [Esc] volver"
-        if provider.provider_id == "multi":
+        if provider.provider_id in ("multi", "gateway"):
             footer += " a providers"
         footer += "  escribe para buscar"
         draw_footer(stdscr, footer)
@@ -2644,19 +2989,23 @@ def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) ->
     _slot_models_cache: dict[str, list[tuple[str, str, str]]] = {}
 
     def _models_for(pid: str) -> list[tuple[str, str, str]]:
-        if pid not in _slot_models_cache:
+        cache_key = f"gateway:{pid}" if provider.provider_id == "gateway" else pid
+        if cache_key not in _slot_models_cache:
             try:
-                _slot_models_cache[pid] = get_slot_models_for_provider(pid)
+                if provider.provider_id == "gateway":
+                    _slot_models_cache[cache_key] = get_gateway_slot_models_for_provider(pid)
+                else:
+                    _slot_models_cache[cache_key] = get_slot_models_for_provider(pid)
             except Exception:
-                _slot_models_cache[pid] = []
-        return _slot_models_cache[pid]
+                _slot_models_cache[cache_key] = []
+        return _slot_models_cache[cache_key]
 
-    if provider.provider_id != "multi":
+    if provider.provider_id not in ("multi", "gateway"):
         # Eagerly pre-load just the one provider for single-provider flows.
         _models_for(provider.provider_id)
 
     def reset_stage_context(current_stage: str) -> tuple[str, str | None, list[tuple[str, str, str]] | None]:
-        if provider.provider_id == "multi":
+        if provider.provider_id in ("multi", "gateway"):
             return "provider", None, None
         return "model", provider.provider_id, _models_for(provider.provider_id)
 
@@ -2668,15 +3017,16 @@ def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) ->
         sub_sel = 0
         # Inner loop: navigate provider -> model -> done for this slot
         while True:
+            option_ids = GATEWAY_PROVIDER_IDS if provider.provider_id == "gateway" else ALL_PROVIDER_IDS
             provider_options = [
-                prov_id for prov_id in ALL_PROVIDER_IDS
+                prov_id for prov_id in option_ids
                 if not sub_query
                 or sub_query.lower() in ALL_PROVIDER_LABELS.get(prov_id, prov_id).lower()
                 or sub_query.lower() in prov_id.lower()
             ]
             no_match = False
             if sub_stage == "provider" and sub_query and not provider_options:
-                provider_options = list(ALL_PROVIDER_IDS)
+                provider_options = list(option_ids)
                 no_match = True
             elif sub_stage == "model" and sub_query:
                 current_models = sub_models or []
@@ -2714,7 +3064,7 @@ def pick_agent_slots(stdscr, provider, main_model, wizard_state: WizardState) ->
                     sub_sel = 0
                     continue
                 if sub_stage == "model":
-                    if provider.provider_id == "multi":
+                    if provider.provider_id in ("multi", "gateway"):
                         sub_stage = "provider"
                         sub_prov = None
                         sub_models = None
@@ -2966,8 +3316,9 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
     catalog = fetch_models_dev_catalog(force=False)
     if not use_plain_defaults:
         apply_context_window_env(model.model_id, catalog, provider.provider_id)
-    # The smart proxy is used only when the main provider is the
-    # explicit multi-provider mode.
+    # The smart proxy is used for explicit multi-provider sessions and
+    # for the gateway provider, where Claude Code needs a safe dummy model
+    # while smart-proxy forwards the real model id to LiteLLM.
     is_multi = is_multi_provider_needed(provider.provider_id, slots)
     effective_provider = (
         next(p for p in PROVIDERS if p.provider_id == "multi")
@@ -2979,7 +3330,7 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         os.environ["CLAUDE_HARNESS_SLOT_SONNET"] = slots.sonnet
     if not use_plain_defaults and slots.haiku:
         os.environ["CLAUDE_HARNESS_SLOT_HAIKU"] = slots.haiku
-    if not use_plain_defaults and effective_provider.provider_id == "multi":
+    if not use_plain_defaults and effective_provider.provider_id in ("multi", "gateway"):
         # Strip the "claude/" prefix here so ANTHROPIC_MODEL gets a clean alias
         # ("opus", "sonnet"…) that Claude Code resolves against its live catalog.
         # Hardcoding the resolution in the proxy is brittle: model snapshots get
@@ -3006,6 +3357,8 @@ def launch(provider: ProviderDefinition, model: ModelItem, thinking_level: str,
         # Strip provider prefix for standard check (e.g., claude/opus -> opus)
         check_model = base_model.split("/")[-1] if "/" in base_model else base_model
         is_standard = check_model in ("opus", "sonnet", "haiku", "fable") or check_model.startswith("claude-")
+        if effective_provider.provider_id == "gateway":
+            is_standard = False
         
         if is_standard and "/" not in base_model:
             args.extend(["--model", cc_model])

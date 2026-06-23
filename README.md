@@ -1,6 +1,6 @@
 # claude-harness
 
-> TUI launcher y harness multi-provider para Claude Code. Switch entre Anthropic, OpenRouter, OpenCode Go, MiniMax y Codex desde una sola interfaz. Pensado para self-hosting y power users.
+> TUI launcher y harness multi-provider para Claude Code. Switch entre LLM Gateway, Anthropic, OpenRouter, OpenCode Go, MiniMax y Codex desde una sola interfaz. Pensado para self-hosting y power users.
 
 ```
 ╭─── Claude Code v2.1.178 ────────────╮
@@ -21,7 +21,7 @@ con el mismo flujo, los mismos slash commands, las mismas skills, los mismos MCP
 
 `claude-harness` te da:
 
-- **Multi-provider**: 5 providers listos (Anthropic, OpenRouter, OpenCode Go, MiniMax, Codex)
+- **Multi-provider**: providers listos (LLM Gateway, Anthropic, OpenRouter, OpenCode Go, MiniMax, Codex)
 - **Catálogo Dinámico**: Extracción en tiempo real de 5000+ modelos via [models.dev](https://models.dev), con sus límites de contexto siempre actualizados.
 - **Per-agent model slots**: opus/sonnet/haiku configurables independientemente
 - **Thinking levels**: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`
@@ -93,6 +93,11 @@ CLAUDE_HARNESS_OPENROUTER_MODEL=anthropic/claude-sonnet-4-5
 CLAUDE_HARNESS_OPENCODE_GO_MODEL=minimax-m3
 CLAUDE_HARNESS_CLAUDE_MODEL=claude-sonnet-4-5
 CLAUDE_HARNESS_CODEX_MODEL=gpt-5
+CLAUDE_HARNESS_GATEWAY_MODEL=claude/claude-sonnet-4-5-20250929
+# Opcional: override del gateway local
+# CLAUDE_HARNESS_GATEWAY_ROOT=$HOME/llm-gateway
+# CLAUDE_HARNESS_GATEWAY_URL=http://127.0.0.1:4000
+# CLAUDE_HARNESS_GATEWAY_AUTO_START=1
 
 # Opt-out del auto-context-window
 # CLAUDE_HARNESS_CONTEXT_WINDOW=0
@@ -109,6 +114,7 @@ Los providers buscan sus API keys en estos lugares (en orden):
 | **OpenCode Go** | `OPENCODE_GO_API_KEY` o `~/.local/share/opencode/auth.json` |
 | **MiniMax** | `MINIMAX_API_KEY` o `~/.local/share/opencode/auth.json` |
 | **Codex** | `OPENAI_API_KEY` o `codex` login |
+| **LLM Gateway** | `~/llm-gateway/.env` (`LITELLM_MASTER_KEY`) |
 
 Si no tenés la key, la TUI te lleva al menú de "Login / Configuración" del provider.
 
@@ -133,7 +139,7 @@ claude-harness
 Te aparece la TUI. Navegás con flechas, elegís con `Enter`. El flujo es siempre:
 
 ```
-1. ¿Qué provider?       →  MiniMax / OpenRouter / OpenCode Go / Anthropic / Codex
+1. ¿Qué provider?       →  LLM Gateway / MiniMax / OpenRouter / OpenCode Go / Anthropic / Codex
 2. ¿Qué modelo?          →  M3, Sonnet 4.5, GPT-5, DeepSeek, etc. (5000+ disponibles)
 3. ¿Qué thinking?        →  off / low / medium / high / xhigh / max / ultracode
 4. ¿Slots de subagentes?  →  opus/sonnet/haiku (default = main, o custom)
@@ -299,6 +305,18 @@ Una vez dentro, todo funciona normal:
 
 ## Providers
 
+### LLM Gateway (recomendado)
+
+```bash
+cd ~/llm-gateway && ./scripts/start
+claude-harness
+# → LLM Gateway → claude/claude-sonnet-4-5-20250929 / gemini/... / codex/... / minimax/...
+```
+
+Usa el gateway local LiteLLM (`http://127.0.0.1:4000`) como fuente única de modelos y credenciales. El launcher `claude-gateway` auto-arranca `~/llm-gateway/scripts/start` si el gateway está caído y `CLAUDE_HARNESS_GATEWAY_AUTO_START=1`.
+
+En la selección del modelo principal y en los slots de subagentes (`sonnet` y `haiku`), el flujo es por proveedor interno: primero elegís `Claude`, `Gemini`, `Codex`, `MiniMax`, `OpenRouter` u `OpenCode Go`, y después el modelo concreto de ese grupo.
+
 ### Anthropic (nativo)
 
 ```bash
@@ -357,7 +375,7 @@ claude-harness
 Una sola sesión de Claude Code con modelos de **distintos providers**. El
 `claude-harness` auto-detecta cuando los slots son de un provider diferente al
 main y arranca un smart proxy local que rutea cada request al backend correcto
-(Anthropic, Codex, MiniMax, OpenRouter u OpenCode Go).
+(LLM Gateway, Anthropic, Codex, MiniMax, OpenRouter u OpenCode Go).
 
 Si main y slots son todos del mismo provider, no hay overhead - usa el wrapper
 de ese provider directo.

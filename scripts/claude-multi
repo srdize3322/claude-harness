@@ -262,6 +262,7 @@ auth_ok() {
       ;;
     codex) [ -f "$HOME/.codex/auth.json" ] || return 1 ;;
     minimax|openrouter|opencode-go) [ -f "$HOME/.local/share/opencode/auth.json" ] || return 1 ;;
+    gateway) [ -f "${CLAUDE_HARNESS_GATEWAY_ROOT:-$HOME/llm-gateway}/.env" ] || [ -n "${LITELLM_MASTER_KEY:-}" ] || return 1 ;;
     gemini) [ -f "$HOME/.gemini/oauth_creds.json" ] || return 1 ;;
     *) return 1 ;;
   esac
@@ -341,6 +342,7 @@ if [ -z "${CLAUDE_HARNESS_MAIN_BACKEND:-}" ] && [ -n "$main_model" ] && [ "$main
     MiniMax-*|minimax/*) export CLAUDE_HARNESS_MAIN_BACKEND="minimax" ;;
     openrouter/*) export CLAUDE_HARNESS_MAIN_BACKEND="openrouter" ;;
     opencode-go/*|minimax-*) export CLAUDE_HARNESS_MAIN_BACKEND="opencode-go" ;;
+    gateway/*) export CLAUDE_HARNESS_MAIN_BACKEND="gateway" ;;
     gemini-*|gemini/*) export CLAUDE_HARNESS_MAIN_BACKEND="gemini" ;;
   esac
 fi

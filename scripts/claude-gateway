@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# claude-gateway: launch Claude Code through claude-harness smart-proxy,
+# with all real model traffic routed to the local llm-gateway (LiteLLM).
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" != /* ]]; then
+    SOURCE="$DIR/$TARGET"
+  else
+    SOURCE="$TARGET"
+  fi
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+HARNESS_ENV_FILE="$HOME/.config/claude-harness/.env"
+GATEWAY_ROOT="${CLAUDE_HARNESS_GATEWAY_ROOT:-$HOME/llm-gateway}"
+GATEWAY_ENV_FILE="$GATEWAY_ROOT/.env"
+GATEWAY_URL="${CLAUDE_HARNESS_GATEWAY_URL:-http://127.0.0.1:4000}"
+
+load_env_file() {
+  local path="$1"
+  if [ -f "$path" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$path"
+    set +a
+  fi
+}
+
+load_env_file "$HARNESS_ENV_FILE"
+# Re-apply root/url after harness env, so env vars can override defaults.
+GATEWAY_ROOT="${CLAUDE_HARNESS_GATEWAY_ROOT:-$GATEWAY_ROOT}"
+GATEWAY_ENV_FILE="$GATEWAY_ROOT/.env"
+GATEWAY_URL="${CLAUDE_HARNESS_GATEWAY_URL:-$GATEWAY_URL}"
+load_env_file "$GATEWAY_ENV_FILE"
+
+ready_gateway() {
+  [ -n "${LITELLM_MASTER_KEY:-}" ] || return 1
+  curl -fsS -m 4 -o /dev/null \
+    -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+    "$GATEWAY_URL/v1/models" 2>/dev/null
+}
+
+if ! ready_gateway; then
+  if [ "${CLAUDE_HARNESS_GATEWAY_AUTO_START:-1}" = "1" ] && [ -x "$GATEWAY_ROOT/scripts/start" ]; then
+    (cd "$GATEWAY_ROOT" && ./scripts/start) >&2
+  fi
+fi
+
+if ! ready_gateway; then
+  echo "llm-gateway no está listo en $GATEWAY_URL." >&2
+  echo "Revisá: cd $GATEWAY_ROOT && ./scripts/status" >&2
+  exit 1
+fi
+
+export CLAUDE_HARNESS_GATEWAY_URL="$GATEWAY_URL"
+export CLAUDE_HARNESS_MAIN_BACKEND="gateway"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-1}"
+export API_TIMEOUT_MS="${API_TIMEOUT_MS:-3000000}"
+
+# claude-multi routes the main model via CLAUDE_HARNESS_SLOT_MAIN. Keep the
+# real gateway model prefixed so smart-proxy can select backend=gateway while
+# still sending the unprefixed model id to LiteLLM.
+if [ -z "${CLAUDE_HARNESS_SLOT_MAIN:-}" ] || [ "${CLAUDE_HARNESS_SLOT_MAIN:-}" = "default" ]; then
+  CLAUDE_HARNESS_SLOT_MAIN="${CLAUDE_HARNESS_GATEWAY_MODEL:-claude/claude-sonnet-4-5-20250929}"
+fi
+case "$CLAUDE_HARNESS_SLOT_MAIN" in
+  gateway/*) ;;
+  *) CLAUDE_HARNESS_SLOT_MAIN="gateway/$CLAUDE_HARNESS_SLOT_MAIN" ;;
+esac
+export CLAUDE_HARNESS_SLOT_MAIN
+
+exec "$SCRIPT_DIR/claude-multi" "$@"

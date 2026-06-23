@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-06-23 — LLM Gateway picker por proveedor
+
+En el provider `LLM Gateway`, la selección del modelo principal y los slots de subagentes ahora usan navegación en dos pasos: primero proveedor interno del gateway (`Claude`, `Gemini`, `Codex`, `MiniMax`, `OpenRouter`, `OpenCode Go`) y luego modelo. Esto evita buscar en una lista plana grande y mantiene los modelos con prefijo `gateway/<modelo-real>` para que `smart-proxy` enrute a LiteLLM.
+
+## 2026-06-23 — LLM Gateway como provider central
+
+`claude-harness` ahora puede usar `~/llm-gateway` como backend centralizado. Se agregó:
+
+- provider `LLM Gateway` en la TUI;
+- launcher `claude-gateway`, que auto-arranca `~/llm-gateway/scripts/start` si hace falta;
+- backend `gateway` en `smart-proxy.py`, usando modelos `gateway/<modelo-real>` y reenviando a LiteLLM `:4000` por la cara Anthropic `/v1/messages`;
+- listado dinámico de modelos desde `GET :4000/v1/models`, con fallback al `litellm/config.yaml` generado;
+- instalación/symlink para `claude-gateway`.
+
+Esto permite usar desde Claude Code modelos servidos por `llm-gateway` (`claude/`, `gemini/`, `codex/`, `minimax/`, `openrouter/`, `opencodego/`) sin duplicar auth/routing dentro de `claude-harness`.
+
 ## 2026-06-20 — Codex en multi-provider: 401 intermitente
 
 Cuando Codex se usa como slot o como main vía `claude-multi` (no como

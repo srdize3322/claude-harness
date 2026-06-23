@@ -13,6 +13,7 @@ Backends:
   MiniMax-*  | minimax/*    -> MiniMax API (Anthropic-compatible)
   openrouter/* |             -> OpenRouter API (Anthropic-compatible)
   opencode-go/* |            -> OpenCode Go Cloudflare worker
+  gateway/*  |               -> local llm-gateway (LiteLLM /v1/messages)
   other                         -> main backend (env: CLAUDE_HARNESS_MAIN_BACKEND)
 
 Auth sources (auto-detected at startup):
@@ -21,6 +22,7 @@ Auth sources (auto-detected at startup):
   MiniMax:    ~/.local/share/opencode/auth.json (key "minimax")
   OpenRouter: ~/.local/share/opencode/auth.json (key "openrouter")
   OpenCodeGo: ~/.local/share/opencode/auth.json (key "opencode-go")
+  Gateway:    ~/llm-gateway/.env (LITELLM_MASTER_KEY) or env
 
 Usage:
   smart-proxy.py [--port 8081] [--host 127.0.0.1]
@@ -48,11 +50,13 @@ ANTHROPIC_VERSION = "2023-06-01"
 MINIMAX_DEFAULT_BASE = "https://api.minimax.io/anthropic"
 OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api"
 OPENCODE_GO_DEFAULT_BASE = "https://opencode-go-proxy.r2gnqdy9c5.workers.dev"
+GATEWAY_DEFAULT_BASE = "http://127.0.0.1:4000"
 CODEX_LOCAL_PROXY_DEFAULT = "http://127.0.0.1:8080"
 
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
 OPENCODE_AUTH_PATH = os.path.expanduser("~/.local/share/opencode/auth.json")
+GATEWAY_ENV_PATH = os.path.expanduser("~/llm-gateway/.env")
 
 
 def estimate_tokens(text: str) -> int:
@@ -175,6 +179,32 @@ def get_opencode_go_key():
     return key
 
 
+def _read_env_value(path: str, key: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == key:
+                    return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def get_gateway_key():
+    key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+    if key:
+        return key
+    return _read_env_value(GATEWAY_ENV_PATH, "LITELLM_MASTER_KEY")
+
+
+def get_gateway_base():
+    return os.environ.get("CLAUDE_HARNESS_GATEWAY_URL", "").strip() or GATEWAY_DEFAULT_BASE
+
+
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
@@ -251,7 +281,7 @@ def detect_backend(model: str) -> tuple[str, str]:
     """Map a model name to (backend, clean_model).
 
     backend is one of: "anthropic", "codex", "minimax", "openrouter",
-    "opencode-go", "main".
+    "opencode-go", "gateway", "main".
     clean_model is the model name to send to the backend (with any
     provider prefix stripped).
     """
@@ -268,6 +298,7 @@ def detect_backend(model: str) -> tuple[str, str]:
         "minimax/": "minimax",
         "openrouter/": "openrouter",
         "opencode-go/": "opencode-go",
+        "gateway/": "gateway",
         "gemini/": "gemini",
     }
     for prefix, backend in prefix_map.items():
@@ -420,6 +451,7 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
                     "minimax": bool(get_minimax_key()),
                     "openrouter": bool(get_openrouter_key()),
                     "opencode-go": bool(get_opencode_go_key()),
+                    "gateway": bool(get_gateway_key()),
                 },
             })
             return
@@ -538,7 +570,7 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
         # 404 not_found_error from the API.
         if backend in ("anthropic", "main"):
             if clean_model == "opus": clean_model = "claude-opus-4-8"
-            elif clean_model == "sonnet": clean_model = "claude-sonnet-4-6"
+            elif clean_model == "sonnet": clean_model = "claude-sonnet-4-5-20250929"
             elif clean_model == "haiku": clean_model = "claude-haiku-4-5-20251001"
             elif clean_model == "fable": clean_model = "claude-fable-5"
 
@@ -637,6 +669,12 @@ class SmartProxyHandler(BaseHTTPRequestHandler):
                 if not key:
                     return self._error(401, "OpenCode Go API key not configured", "authentication_error")
                 base = os.environ.get("OPENCODE_GO_BASE_URL", "").strip() or OPENCODE_GO_DEFAULT_BASE
+                url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
+            elif backend == "gateway":
+                key = get_gateway_key()
+                if not key:
+                    return self._error(401, "llm-gateway key not configured", "authentication_error")
+                base = get_gateway_base()
                 url, h, data = _build_passthrough_request(base, body, in_headers, f"Bearer {key}")
             elif backend == "gemini":
                 # gemini-proxy handles OAuth refresh, project discovery, and
@@ -813,6 +851,7 @@ def main():
         "minimax": bool(get_minimax_key()),
         "openrouter": bool(get_openrouter_key()),
         "opencode-go": bool(get_opencode_go_key()),
+        "gateway": bool(get_gateway_key()),
     }
     server = ThreadingHTTPServer((args.host, args.port), SmartProxyHandler)
     sys.stderr.write(f"[smart-proxy] listening on http://{args.host}:{args.port}\n")

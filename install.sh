@@ -185,6 +185,7 @@ download "scripts/claude-openrouter"     "$PREFIX/scripts/claude-openrouter"    
 download "scripts/claude-opencode-go"    "$PREFIX/scripts/claude-opencode-go"    true
 download "scripts/claude-native"         "$PREFIX/scripts/claude-native"         true
 download "scripts/claude-codex"          "$PREFIX/scripts/claude-codex"          true
+download "scripts/claude-gateway"        "$PREFIX/scripts/claude-gateway"        true
 download "scripts/claude-multi"          "$PREFIX/scripts/claude-multi"          true
 download "scripts/codex-proxy.py"        "$PREFIX/scripts/codex-proxy.py"        true
 download "scripts/smart-proxy.py"        "$PREFIX/scripts/smart-proxy.py"        true
@@ -198,7 +199,7 @@ echo
 if [ -z "${CLAUDE_HARNESS_NO_SYMLINK:-}" ]; then
   log "Creando symlinks en $BINDIR"
   mkdir -p "$BINDIR"
-  for script in claude-harness claude-minimax claude-openrouter claude-opencode-go claude-native claude-codex claude-multi; do
+  for script in claude-harness claude-minimax claude-openrouter claude-opencode-go claude-native claude-codex claude-gateway claude-multi; do
     ln -sf "$PREFIX/scripts/$script" "$BINDIR/$script"
     dim "$BINDIR/$script -> $PREFIX/scripts/$script"
   done
